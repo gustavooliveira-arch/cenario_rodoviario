@@ -368,6 +368,9 @@ def _fill_hex(hex_cor: str) -> PatternFill:
     return PatternFill(fill_type="solid", fgColor="FF" + rgb)
 
 
+
+
+
 def salvar_cenario(
     caminho_origem: str | None,
     nome_aba: str,
@@ -377,73 +380,458 @@ def salvar_cenario(
     fontes: list[list[str | None]],
     caminho_saida: str,
 ) -> None:
-    """Grava o Cenário processado (valores + cores) e mantém as demais abas."""
+    """
+    Grava o cenário processado.
+
+    - TIPO DE ALTERAÇÃO fica na primeira coluna.
+    - A formatação dos cabeçalhos é preservada pelo nome original.
+    - Colunas como TRILHO mantêm sua formatação, mesmo após a reordenação.
+    - Preserva cores, fontes e horários.
+    - Otimizado para grandes volumes.
+    """
+
+    if df is None:
+        raise ValueError("Não existe DataFrame para salvar.")
+
+    if header_row < 1:
+        raise ValueError("Linha de cabeçalho inválida.")
+
+    # ======================================================
+    # GARANTE TIPO DE ALTERAÇÃO COMO PRIMEIRA COLUNA
+    # ======================================================
+
+    indice_tipo = next(
+        (
+            i
+            for i, nome in enumerate(df.columns)
+            if norm_cabecalho(nome)
+            == norm_cabecalho("TIPO DE ALTERAÇÃO")
+        ),
+        None
+    )
+
+    if indice_tipo is not None and indice_tipo != 0:
+
+        ordem = [indice_tipo] + [
+            i for i in range(len(df.columns))
+            if i != indice_tipo
+        ]
+
+        df = df.iloc[:, ordem].copy()
+
+        bgs = [
+            [
+                linha[i] if i < len(linha) else "#FFFFFF"
+                for i in ordem
+            ]
+            for linha in bgs
+        ]
+
+        fontes = [
+            [
+                linha[i] if i < len(linha) else None
+                for i in ordem
+            ]
+            for linha in fontes
+        ]
+
+    else:
+        df = df.copy()
+
+    # ======================================================
+    # ABERTURA DO WORKBOOK
+    # ======================================================
+
     if caminho_origem:
+
         wb = load_workbook(caminho_origem)
+
         if nome_aba in wb.sheetnames:
             ws = wb[nome_aba]
         else:
             ws = wb.create_sheet(nome_aba)
-            for c, nome in enumerate(df.columns, start=1):
-                ws.cell(1, c, str(nome))
             header_row = 1
+
     else:
+
         wb = Workbook()
         ws = wb.active
         ws.title = nome_aba or "Cenario"
-        for c, nome in enumerate(df.columns, start=1):
-            ws.cell(1, c, str(nome))
         header_row = 1
 
-    if ws.max_row > header_row:
-        ws.delete_rows(header_row + 1, ws.max_row - header_row)
+    try:
 
-    n = len(df)
-    ncols = len(df.columns)
-    eh_col_hora = [
-        norm_sem_acento(nome) in ("PARTIDA", "CHEGADA") for nome in df.columns
-    ]
+        n = len(df)
+        ncols = len(df.columns)
 
-    for i in range(n):
-        r = header_row + 1 + i
-        for c in range(ncols):
-            valor = df.iat[i, c]
-            if valor is None or (not isinstance(valor, str) and pd.isna(valor)):
-                valor = None
-            elif isinstance(valor, str) and valor == "":
-                valor = None
+        # ==================================================
+        # GUARDA A FORMATAÇÃO ORIGINAL DOS CABEÇALHOS
+        # ANTES DE ALTERAR A ORDEM DAS COLUNAS
+        # ==================================================
 
-            # Horários "HH:MM" voltam a ser horários reais do Excel
-            # (antes eram gravados como texto, com number_format sem efeito).
-            if eh_col_hora[c] and isinstance(valor, str):
-                m = _RE_HORA.match(valor)
-                if m and int(m.group(1)) < 24 and int(m.group(2)) < 60:
-                    valor = time(int(m.group(1)), int(m.group(2)))
+        estilos_por_nome = {}
+        contagem_estilos = {}
+        estilos_modelo = {}
 
-            cell = ws.cell(r, c + 1, valor)
+        for c in range(1, ws.max_column + 1):
 
-            bg = bgs[i][c] if i < len(bgs) and c < len(bgs[i]) else "#FFFFFF"
-            ft = fontes[i][c] if i < len(fontes) and c < len(fontes[i]) else None
+            cel_original = ws.cell(
+                header_row,
+                c
+            )
 
-            # Sempre sobrescreve o preenchimento. Não fazer isso deixa cores
-            # antigas no arquivo quando a nova célula não possui cor.
-            cell.fill = _fill_hex(bg or "#FFFFFF")
+            nome_original = norm_cabecalho(
+                cel_original.value
+            )
 
-            # Mantém negrito, tamanho, família e demais atributos da fonte,
-            # alterando somente a cor.
-            if ft and _claro(ft) and _claro(bg):
-                ft = None
-            fonte_atual = copy(cell.font)
-            fonte_atual.color = "FF" + ft.replace("#", "")[:6] if ft else "FF000000"
-            cell.font = fonte_atual
+            if nome_original:
 
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            if isinstance(valor, time):
-                cell.number_format = "hh:mm"
+                estilo_original = (
+                    copy(cel_original._style)
+                    if cel_original.has_style
+                    else None
+                )
 
-    for c in range(1, ncols + 1):
-        letra = get_column_letter(c)
-        if ws.column_dimensions[letra].width is None:
-            ws.column_dimensions[letra].width = 12
+                estilos_por_nome.setdefault(
+                    nome_original,
+                    []
+                ).append(estilo_original)
 
-    wb.save(caminho_saida)
+            if cel_original.has_style:
+
+                estilo_id = cel_original.style_id
+
+                contagem_estilos[estilo_id] = (
+                    contagem_estilos.get(estilo_id, 0) + 1
+                )
+
+                estilos_modelo[estilo_id] = copy(
+                    cel_original._style
+                )
+
+        # ==================================================
+        # IDENTIFICA O ESTILO PADRÃO DOS CABEÇALHOS
+        # ==================================================
+
+        estilo_padrao = None
+
+        if contagem_estilos:
+
+            id_estilo_padrao = max(
+                contagem_estilos,
+                key=contagem_estilos.get
+            )
+
+            estilo_padrao = estilos_modelo[
+                id_estilo_padrao
+            ]
+
+        # ==================================================
+        # LIMPA OS DADOS ANTIGOS
+        # ==================================================
+
+        if ws.max_row > header_row:
+
+            ws.delete_rows(
+                header_row + 1,
+                ws.max_row - header_row
+            )
+
+        # ==================================================
+        # ATUALIZA OS CABEÇALHOS PRESERVANDO A FORMATAÇÃO
+        # ==================================================
+
+        ocorrencias = {}
+
+        for c, nome in enumerate(
+            df.columns,
+            start=1
+        ):
+
+            nome = (
+                ""
+                if nome is None
+                else str(nome)
+            )
+
+            chave = norm_cabecalho(nome)
+
+            destino = ws.cell(
+                header_row,
+                c
+            )
+
+            lista_estilos = estilos_por_nome.get(
+                chave,
+                []
+            )
+
+            indice_ocorrencia = ocorrencias.get(
+                chave,
+                0
+            )
+
+            estilo = None
+
+            if indice_ocorrencia < len(lista_estilos):
+
+                estilo = lista_estilos[
+                    indice_ocorrencia
+                ]
+
+                ocorrencias[chave] = (
+                    indice_ocorrencia + 1
+                )
+
+            # Colunas novas recebem o estilo predominante.
+            if estilo is None:
+                estilo = estilo_padrao
+
+            # Copia a formatação completa do cabeçalho original.
+            if estilo is not None:
+
+                destino._style = copy(estilo)
+
+            # Atualiza somente o texto.
+            destino.value = nome
+
+        # Limpa cabeçalhos que não pertencem mais ao resultado.
+        for c in range(
+            ncols + 1,
+            ws.max_column + 1
+        ):
+
+            ws.cell(
+                header_row,
+                c
+            ).value = None
+
+        # ==================================================
+        # IDENTIFICA COLUNAS DE HORÁRIO
+        # ==================================================
+
+        eh_col_hora = [
+            norm_sem_acento(nome) in (
+                "PARTIDA",
+                "CHEGADA"
+            )
+            for nome in df.columns
+        ]
+
+        # ==================================================
+        # CACHES DE FORMATAÇÃO
+        # ==================================================
+
+        cache_fill = {}
+        cache_fonte = {}
+
+        alinhamento = Alignment(
+            horizontal="center",
+            vertical="center"
+        )
+
+        fonte_preta = "FF000000"
+
+        # ==================================================
+        # LARGURA DA COLUNA TIPO DE ALTERAÇÃO
+        # ==================================================
+
+        if (
+            ncols > 0
+            and norm_cabecalho(df.columns[0])
+            == norm_cabecalho("TIPO DE ALTERAÇÃO")
+        ):
+
+            letra = get_column_letter(1)
+
+            largura_atual = (
+                ws.column_dimensions[letra].width
+                or 0
+            )
+
+            ws.column_dimensions[letra].width = max(
+                largura_atual,
+                30
+            )
+
+        # ==================================================
+        # GRAVAÇÃO DOS DADOS
+        # ==================================================
+
+        for i, linha in enumerate(
+            df.itertuples(index=False, name=None)
+        ):
+
+            r = header_row + 1 + i
+
+            bg_linha = (
+                bgs[i]
+                if i < len(bgs)
+                else ()
+            )
+
+            ft_linha = (
+                fontes[i]
+                if i < len(fontes)
+                else ()
+            )
+
+            for c, valor in enumerate(linha):
+
+                # ------------------------------------------
+                # TRATAMENTO DE VALORES VAZIOS
+                # ------------------------------------------
+
+                if valor is None:
+
+                    valor = None
+
+                elif isinstance(valor, str):
+
+                    if valor == "":
+                        valor = None
+
+                else:
+
+                    try:
+
+                        if pd.isna(valor):
+                            valor = None
+
+                    except (TypeError, ValueError):
+                        pass
+
+                # ------------------------------------------
+                # CONVERSÃO DE HORÁRIOS
+                # ------------------------------------------
+
+                if (
+                    valor is not None
+                    and eh_col_hora[c]
+                    and isinstance(valor, str)
+                ):
+
+                    m = _RE_HORA.match(valor)
+
+                    if m:
+
+                        hora = int(m.group(1))
+                        minuto = int(m.group(2))
+
+                        if hora < 24 and minuto < 60:
+
+                            valor = time(
+                                hora,
+                                minuto
+                            )
+
+                # ------------------------------------------
+                # CRIA A CÉLULA
+                # ------------------------------------------
+
+                cell = ws.cell(
+                    r,
+                    c + 1,
+                    valor
+                )
+
+                # ------------------------------------------
+                # COR DE PREENCHIMENTO
+                # ------------------------------------------
+
+                bg = (
+                    bg_linha[c]
+                    if c < len(bg_linha) and bg_linha[c]
+                    else "#FFFFFF"
+                )
+
+                ft = (
+                    ft_linha[c]
+                    if c < len(ft_linha)
+                    else None
+                )
+
+                if ft and _claro(ft) and _claro(bg):
+                    ft = None
+
+                cor_bg = bg.upper()
+
+                fill = cache_fill.get(cor_bg)
+
+                if fill is None:
+
+                    fill = _fill_hex(cor_bg)
+
+                    cache_fill[cor_bg] = fill
+
+                cell.fill = fill
+
+                # ------------------------------------------
+                # COR DA FONTE
+                # ------------------------------------------
+
+                cor_ft = (
+                    "FF" + ft.replace("#", "")[:6]
+                    if ft
+                    else fonte_preta
+                )
+
+                font_id = (
+                    cell._style.fontId
+                    if cell._style is not None
+                    else 0
+                )
+
+                chave_fonte = (
+                    font_id,
+                    cor_ft
+                )
+
+                fonte = cache_fonte.get(
+                    chave_fonte
+                )
+
+                if fonte is None:
+
+                    fonte = copy(cell.font)
+
+                    fonte.color = cor_ft
+
+                    cache_fonte[chave_fonte] = fonte
+
+                cell.font = fonte
+
+                # ------------------------------------------
+                # ALINHAMENTO
+                # ------------------------------------------
+
+                cell.alignment = alinhamento
+
+                # ------------------------------------------
+                # FORMATO DOS HORÁRIOS
+                # ------------------------------------------
+
+                if isinstance(valor, time):
+                    cell.number_format = "hh:mm"
+
+        # ==================================================
+        # LARGURAS DAS COLUNAS
+        # ==================================================
+
+        for c in range(1, ncols + 1):
+
+            letra = get_column_letter(c)
+
+            if ws.column_dimensions[letra].width is None:
+
+                ws.column_dimensions[letra].width = 12
+
+        # ==================================================
+        # SALVAMENTO
+        # ==================================================
+
+        wb.save(caminho_saida)
+
+    finally:
+
+        wb.close()
