@@ -1,6 +1,4 @@
-
 import sys
-import pandas as pd
 import time
 import traceback
 import copy
@@ -8,13 +6,17 @@ import unicodedata
 import io
 import zipfile
 import requests
+
 from estilo_app import aplicar_estilo, aplicar_fundo_blur
+
 from dataclasses import dataclass
 from pathlib import Path
-PASTA_APP = Path(__file__).resolve().parent
-CAMINHO_ICONE = PASTA_APP / "assets" / "logo.ico"
-from openpyxl import Workbook
+
+import pandas as pd
+
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
+
 from PySide6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
@@ -24,15 +26,20 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import (QColor, QIcon)
+
+from PySide6.QtGui import QColor, QBrush, QIcon
+
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
+    QFrame,
     QHeaderView,
     QLabel,
     QMessageBox,
     QInputDialog,
     QLineEdit,
+    QProgressBar,
     QProgressDialog,
     QPushButton,
     QTableView,
@@ -40,12 +47,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
 from excel_io import (
     carregar_cenario,
     carregar_timetable,
     salvar_cenario,
+    cor_preenchimento,
+    cor_fonte,
+    paleta_tema,
 )
+
 from regras_cenario import _processar as processar_em_memoria
+
+
+PASTA_APP = Path(__file__).resolve().parent
+CAMINHO_ICONE = PASTA_APP / "assets" / "logo.ico"
 
 
 # ============================================================
@@ -113,6 +129,32 @@ def _cor_hex(valor, padrao="#FFFFFF"):
         return "#" + texto[-6:].upper()
 
     return padrao
+
+
+def _ler_estilos_cabecalho_excel(caminho, nome_aba, linha_cabecalho, quantidade_colunas):
+    """Lê as cores reais do cabeçalho no Excel, incluindo cores de tema/tint."""
+    if not caminho or not nome_aba or not linha_cabecalho or quantidade_colunas <= 0:
+        return [], []
+
+    wb = load_workbook(caminho, data_only=True)
+    try:
+        if nome_aba not in wb.sheetnames:
+            return [], []
+
+        ws = wb[nome_aba]
+        tema = paleta_tema(wb)
+        fundos = []
+        fontes = []
+
+        for coluna in range(1, quantidade_colunas + 1):
+            celula = ws.cell(row=int(linha_cabecalho), column=coluna)
+            fundos.append(cor_preenchimento(celula, tema) or "#FFFFFF")
+            # Quando a fonte não tem cor explícita, o padrão do Excel é preto.
+            fontes.append(cor_fonte(celula, tema) or "#000000")
+
+        return fundos, fontes
+    finally:
+        wb.close()
 
 
 # ============================================================
@@ -611,22 +653,26 @@ def processar_cenario(
 class PlanilhaModel(QAbstractTableModel):
     """Modelo virtual: a tabela só pinta as células visíveis."""
 
-    def __init__(self, df=None, bgs=None, fontes=None):
+    def __init__(self, df=None, bgs=None, fontes=None, cores_cabecalho=None, fontes_cabecalho=None):
         super().__init__()
 
         self.definir(
             df,
             bgs,
-            fontes
+            fontes,
+            cores_cabecalho,
+            fontes_cabecalho
         )
 
-    def definir(self, df, bgs=None, fontes=None):
+    def definir(self, df, bgs=None, fontes=None, cores_cabecalho=None, fontes_cabecalho=None):
 
         self.beginResetModel()
 
         self.df = df
         self.bgs = bgs or []
         self.fontes = fontes or []
+        self.cores_cabecalho = list(cores_cabecalho or [])
+        self.fontes_cabecalho = list(fontes_cabecalho or [])
 
         self.endResetModel()
 
@@ -650,14 +696,33 @@ class PlanilhaModel(QAbstractTableModel):
         orientation,
         role=Qt.DisplayRole
     ):
-
-        if role != Qt.DisplayRole or self.df is None:
+        """Fornece texto e cores do cabeçalho original do arquivo Excel."""
+        if self.df is None:
             return None
 
         if orientation == Qt.Horizontal:
-            return str(self.df.columns[section])
+            if role == Qt.DisplayRole:
+                return str(self.df.columns[section])
 
-        return str(section + 1)
+            if role == Qt.BackgroundRole and section < len(self.cores_cabecalho):
+                cor = self.cores_cabecalho[section]
+                if cor:
+                    return QBrush(QColor(cor))
+
+            if role == Qt.ForegroundRole and section < len(self.fontes_cabecalho):
+                cor = self.fontes_cabecalho[section]
+                if cor:
+                    return QBrush(QColor(cor))
+
+            if role == Qt.TextAlignmentRole:
+                return Qt.AlignCenter
+
+            return None
+
+        if orientation == Qt.Vertical and role == Qt.DisplayRole:
+            return str(section + 1)
+
+        return None
 
     def data(self, index, role=Qt.DisplayRole):
 
@@ -1050,6 +1115,12 @@ def importar_cenario_optz(usuario, senha, planejamento_id, progresso=None):
         progresso(97, "Importando planilha exportada…")
     dados = carregar_cenario(str(caminho))
     dados["caminho"] = str(caminho)
+    dados["header_bgs"], dados["header_fontes"] = _ler_estilos_cabecalho_excel(
+        str(caminho),
+        dados["aba"],
+        dados["header_row"],
+        len(dados["df"].columns),
+    )
     dados["origem_optz"] = True
     dados["cenario_optz"] = cenario
     return dados
@@ -1078,6 +1149,8 @@ class AbaImportador(QWidget):
         self.df = None
         self.bgs = None
         self.fontes = None
+        self.cores_cabecalho = []
+        self.fontes_cabecalho = []
 
         # Cópia dos dados originais.
         # Aplicar alterações sempre parte daqui.
@@ -1181,6 +1254,12 @@ class AbaImportador(QWidget):
                 )
 
             dados["caminho"] = caminho
+            dados["header_bgs"], dados["header_fontes"] = _ler_estilos_cabecalho_excel(
+                caminho,
+                dados["aba"],
+                dados["header_row"],
+                len(dados["df"].columns),
+            )
 
             return dados
 
@@ -1211,6 +1290,8 @@ class AbaImportador(QWidget):
         self.df = dados["df"]
         self.bgs = dados["bgs"]
         self.fontes = dados["fontes"]
+        self.cores_cabecalho = dados.get("header_bgs", [])
+        self.fontes_cabecalho = dados.get("header_fontes", [])
 
         self.df_original = self.df
         self.bgs_original = self.bgs
@@ -1233,7 +1314,9 @@ class AbaImportador(QWidget):
         self.modelo.definir(
             self.df,
             self.bgs,
-            self.fontes
+            self.fontes,
+            self.cores_cabecalho,
+            self.fontes_cabecalho,
         )
 
         self.tabela.resizeColumnsToContents()
@@ -1241,16 +1324,40 @@ class AbaImportador(QWidget):
         self.importado.emit()
 
     def atualizar(self, df, bgs, fontes):
-        """Mostra o resultado processado, sem alterar os dados originais."""
+        """Mostra o resultado processado, mantendo a cor original de cada cabeçalho."""
 
         self.df = df
         self.bgs = bgs
         self.fontes = fontes
 
+        # Associa os estilos do cabeçalho original aos nomes das colunas
+        # visíveis. Isso também funciona quando TIPO DE ALTERAÇÃO é removida
+        # da visualização após o processamento.
+        indices_originais = {
+            str(nome): i
+            for i, nome in enumerate(self.df_original.columns)
+        } if self.df_original is not None else {}
+
+        cores_visiveis = []
+        fontes_visiveis = []
+        for nome in df.columns:
+            indice = indices_originais.get(str(nome))
+            if indice is not None and indice < len(self.cores_cabecalho):
+                cores_visiveis.append(self.cores_cabecalho[indice])
+            else:
+                cores_visiveis.append("#FFFFFF")
+
+            if indice is not None and indice < len(self.fontes_cabecalho):
+                fontes_visiveis.append(self.fontes_cabecalho[indice])
+            else:
+                fontes_visiveis.append("#000000")
+
         self.modelo.definir(
             df,
             bgs,
-            fontes
+            fontes,
+            cores_visiveis,
+            fontes_visiveis,
         )
 
         self.tabela.resizeColumnsToContents()
@@ -1289,6 +1396,108 @@ class AbaImportador(QWidget):
 
 
 # ============================================================
+# DIÁLOGO DE PROGRESSO TRANSLÚCIDO (BARRA EM LINHA)
+# ============================================================
+
+class DialogoProgressoLinha(QDialog):
+    """Diálogo translúcido, sem moldura, com barra de progresso em linha fina."""
+
+    def __init__(self, parent, titulo="", texto=""):
+        super().__init__(parent)
+
+        self.setWindowTitle(titulo)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setWindowModality(Qt.WindowModal)
+        self.setMinimumWidth(440)
+
+        self.cartao = QFrame(self)
+        self.cartao.setObjectName("cartaoProgresso")
+
+        self.label_titulo = QLabel(titulo)
+        self.label_titulo.setObjectName("tituloProgresso")
+
+        self.label_texto = QLabel(texto)
+        self.label_texto.setObjectName("textoProgresso")
+        self.label_texto.setWordWrap(True)
+
+        self.barra = QProgressBar()
+        self.barra.setRange(0, 100)
+        self.barra.setValue(0)
+        self.barra.setTextVisible(False)
+        self.barra.setFixedHeight(3)
+
+        interno = QVBoxLayout(self.cartao)
+        interno.setContentsMargins(24, 20, 24, 22)
+        interno.setSpacing(12)
+        interno.addWidget(self.label_titulo)
+        interno.addWidget(self.label_texto)
+        interno.addSpacing(4)
+        interno.addWidget(self.barra)
+
+        externo = QVBoxLayout(self)
+        externo.setContentsMargins(0, 0, 0, 0)
+        externo.addWidget(self.cartao)
+
+        self.setStyleSheet("""
+            QDialog {
+                background: transparent;
+            }
+            QFrame#cartaoProgresso {
+                background-color: rgba(255, 255, 255, 170);
+                border: 1px solid rgba(255, 255, 255, 220);
+                border-radius: 14px;
+            }
+            QLabel {
+                background: transparent;
+                color: #1F2430;
+            }
+            QLabel#tituloProgresso {
+                font-size: 15px;
+                font-weight: 600;
+            }
+            QLabel#textoProgresso {
+                font-size: 12px;
+                color: rgba(31, 36, 48, 200);
+            }
+            QProgressBar {
+                background-color: rgba(0, 0, 0, 35);
+                border: none;
+                border-radius: 1px;
+                min-height: 3px;
+                max-height: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #4DA3FF;
+                border-radius: 1px;
+            }
+        """)
+
+    # API compatível com QProgressDialog
+    def setValue(self, valor):
+        self.barra.setValue(int(valor))
+
+    def setLabelText(self, texto):
+        self.label_texto.setText(texto)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        pai = self.parentWidget()
+        if pai is not None:
+            centro = pai.frameGeometry().center()
+            geo = self.frameGeometry()
+            geo.moveCenter(centro)
+            self.move(geo.topLeft())
+
+    def keyPressEvent(self, event):
+        # Impede fechar com ESC durante a importação.
+        if event.key() == Qt.Key_Escape:
+            event.ignore()
+            return
+        super().keyPressEvent(event)
+
+
+# ============================================================
 # JANELA PRINCIPAL
 # ============================================================
 
@@ -1301,7 +1510,6 @@ class JanelaPrincipal(QWidget):
         self.setWindowTitle(
             "Importador de Excel - TimeTable e Cenário"
         )
-
         self.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
 
         self.resize(1100, 700)
@@ -1499,15 +1707,11 @@ class JanelaPrincipal(QWidget):
         )
 
     def _iniciar_importacao_optz(self, usuario, senha, planejamento_id, planejamento):
-        dlg = QProgressDialog(
-            "Iniciando importação…", "", 0, 100, self
+        dlg = DialogoProgressoLinha(
+            self,
+            "Importando cenário",
+            "Iniciando importação…",
         )
-        dlg.setCancelButton(None)
-        dlg.setWindowTitle("Importar cenário do OPT+Z")
-        dlg.setWindowModality(Qt.WindowModal)
-        dlg.setMinimumDuration(0)
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)
         dlg.show()
 
         def tarefa(progresso):
@@ -1821,10 +2025,14 @@ class JanelaPrincipal(QWidget):
 # ============================================================
 
 if __name__ == "__main__":
+
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
     aplicar_estilo(app)
+
     janela = JanelaPrincipal()
     aplicar_fundo_blur(janela)
+
     janela.show()
+
     sys.exit(app.exec())

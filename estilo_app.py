@@ -13,8 +13,11 @@ Integração no main.py:
     janela.show()
 
 O fundo usa gradientes radiais animados com transições suaves para criar um
-efeito de blur em movimento nas cores coral e verde-água. Cada mancha
-percorre a tela inteira seguindo uma curva de Lissajous.
+efeito de blur em movimento nas cores coral e verde-água. Cada mancha percorre
+a tela seguindo uma curva de Lissajous.
+
+As tabelas mantêm o delegate padrão do Qt para preservar as cores de fundo e
+fonte fornecidas pelo PlanilhaModel a partir do Excel.
 """
 
 import math
@@ -25,9 +28,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QGraphicsDropShadowEffect,
     QPushButton,
-    QStyle,
-    QStyleOptionViewItem,
-    QStyledItemDelegate,
     QTableView,
     QTabWidget,
     QWidget,
@@ -72,10 +72,10 @@ TAMANHO_BLUR = 1.25
 
 # Animação do fundo. Defina ANIMACAO_ATIVA = False para deixar as manchas paradas.
 ANIMACAO_ATIVA = True
-INTERVALO_ANIMACAO_MS = 33          # ~30 fps
+INTERVALO_ANIMACAO_MS = 33          # aproximadamente 30 atualizações por segundo
 VELOCIDADE_ANIMACAO = 0.01          # maior = mais rápido
-AMPLITUDE_X = 0.50                  # 0.5 = o centro vai de borda a borda
-AMPLITUDE_Y = 0.50
+AMPLITUDE_X = 0.50                  # deslocamento horizontal relativo
+AMPLITUDE_Y = 0.50                  # deslocamento vertical relativo
 
 
 # ============================================================
@@ -138,20 +138,16 @@ class FundoBlur(QWidget):
         # Base clara para preservar o contraste dos textos e controles.
         painter.fillRect(self.rect(), QColor(CORES["fundo"]))
 
-        # Cada mancha usa um gradiente radial que desaparece gradualmente.
-        # Isso cria a aparência de luz desfocada sem precisar de uma imagem.
         fase = self._fase if ANIMACAO_ATIVA else 0.0
-
-        # Cada mancha percorre a tela inteira numa curva de Lissajous.
-        # Frequências diferentes em X e Y (e entre as manchas) evitam que o
-        # movimento pareça uma repetição simples.
-        # (cor, freq_x, fase_x, freq_y, fase_y, raio, intensidade)
         escala = menor_lado * TAMANHO_BLUR
+
+        # (cor, frequência X, fase X, frequência Y, fase Y, raio, intensidade)
         trajetorias = [
             (CORES["coral"],      0.59, 2.1, 0.67, 4.2, escala * 0.72, 0.92),
             (CORES["verde_agua"], 0.47, 4.0, 0.61, 2.6, escala * 0.82, 1.00),
         ]
 
+        # Cada mancha percorre a tela tanto na horizontal quanto na vertical.
         manchas = [
             (
                 cor,
@@ -190,29 +186,6 @@ class FundoBlur(QWidget):
         painter.end()
 
 
-class DelegateTabelaTransparente(QStyledItemDelegate):
-    """Deixa células brancas translúcidas e preserva as cores de alteração."""
-
-    def paint(self, painter, option, index):
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-
-        fundo = index.data(Qt.BackgroundRole)
-        cor = QColor(fundo) if fundo is not None else QColor()
-
-        # As células brancas representam ausência de preenchimento no Excel.
-        # Usa branco translúcido nelas, mas mantém cores de regras intactas.
-        if not cor.isValid() or (
-            cor.red() >= 248
-            and cor.green() >= 248
-            and cor.blue() >= 248
-        ):
-            opt.backgroundBrush = QColor(255, 255, 255, 155)
-
-        estilo = opt.widget.style() if opt.widget else QApplication.style()
-        estilo.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
-
-
 def aplicar_transparencia_paineis(janela: QWidget) -> None:
     """Deixa translúcidas as páginas das abas que contêm botões e tabelas."""
     for abas in janela.findChildren(QTabWidget):
@@ -224,11 +197,16 @@ def aplicar_transparencia_paineis(janela: QWidget) -> None:
 
 
 def aplicar_transparencia_tabelas(janela: QWidget) -> None:
-    """Aplica delegate para células brancas revelarem o fundo desfocado."""
+    """Deixa o fundo externo da tabela transparente sem alterar as células.
+
+    Não instala delegate personalizado: o delegate padrão do Qt lê diretamente
+    Qt.BackgroundRole e Qt.ForegroundRole do PlanilhaModel. Assim, as cores
+    originais das células importadas do Excel permanecem inalteradas.
+    """
     for tabela in janela.findChildren(QTableView):
         tabela.setAttribute(Qt.WA_TranslucentBackground, True)
         tabela.setAutoFillBackground(False)
-        tabela.setItemDelegate(DelegateTabelaTransparente(tabela))
+        tabela.viewport().setAutoFillBackground(False)
 
 
 def aplicar_sombra_botoes(janela: QWidget) -> None:
@@ -321,8 +299,9 @@ QTabBar::tab:hover {{
 
 QTabBar::tab:selected {{
     /* Aba ativa com branco translúcido. */
-    background-color: rgba(243, 246, 249, 105);
+    background-color: rgba(255, 255, 255, {OPACIDADE_ABA_SELECIONADA});
     color: {CORES['primaria']};
+    border: 1px solid rgba(255, 255, 255, 185);
     border-bottom: none;
     font-weight: 600;
 }}
@@ -368,10 +347,10 @@ QPushButton:disabled {{
     border: 1px solid rgba(170, 183, 196, 90);
 }}
 
-/* Tabelas */
+/* Tabelas: o fundo é transparente, mas as cores das células vêm do modelo. */
 QTableView {{
-    background-color: rgba(243, 246, 249, 125);
-    alternate-background-color: {CORES['alternada']};
+    background-color: transparent;
+    alternate-background-color: transparent;
     color: {CORES['texto']};
     gridline-color: {CORES['borda']};
     border: 1px solid {CORES['borda']};
@@ -391,20 +370,10 @@ QTableView::item:selected {{
     color: {CORES['selecao_texto']};
 }}
 
-QHeaderView::section {{
-    background-color: {CORES['primaria']};
-    color: {CORES['branco']};
-    border: none;
-    border-right: 1px solid #315B85;
-    border-bottom: 1px solid {CORES['primaria']};
-    padding: 9px 7px;
-    font-weight: 600;
-}}
-
-QTableCornerButton::section {{
-    background-color: {CORES['primaria']};
-    border: none;
-}}
+/*
+Não impor cores personalizadas aos cabeçalhos ou ao botão de canto da tabela.
+Eles usam o estilo padrão do Qt/Fusion, sem o azul imposto pelo tema.
+*/
 
 /* Campos de texto e seleção */
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
@@ -549,5 +518,4 @@ def aplicar_estilo(app: QApplication) -> None:
     paleta.setColor(QPalette.Highlight, QColor(CORES["selecao"]))
     paleta.setColor(QPalette.HighlightedText, QColor(CORES["selecao_texto"]))
     app.setPalette(paleta)
-
     app.setStyleSheet(ESTILO_APP)
