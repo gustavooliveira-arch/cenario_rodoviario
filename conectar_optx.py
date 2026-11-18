@@ -1,15 +1,18 @@
 """Localiza o cenário HO mais recente, solicita a exportação no OPT+Z e baixa o XLSX."""
 
 from __future__ import annotations
-from excel_io import carregar_cenario
+
 import io
 import time
 import unicodedata
+import warnings
 import zipfile
 from pathlib import Path
 from typing import Any
 
 import requests
+
+from excel_io import carregar_cenario
 
 
 # ============================================================
@@ -533,6 +536,55 @@ def baixar_exportacao(
     return caminho
 
 
+def importar_cenario_python(caminho: Path) -> dict:
+    """Importa o XLSX baixado usando o carregador já existente do projeto.
+
+    carregar_cenario() retorna um dicionário com df, bgs, fontes e metadados;
+    não retorna uma tupla de três elementos.
+    """
+    print("\n========== IMPORTANDO CENÁRIO PARA O PYTHON ==========")
+
+    # O arquivo exportado pelo OPT+Z pode não conter um estilo padrão do Excel.
+    # O openpyxl aplica um estilo padrão automaticamente; esse aviso não impede
+    # a leitura, então suprimimos somente esse aviso específico.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Workbook contains no default style, apply openpyxl's default",
+            category=UserWarning,
+        )
+        dados = carregar_cenario(str(caminho))
+
+    if not isinstance(dados, dict):
+        raise TypeError(
+            "carregar_cenario() deveria retornar um dicionário, "
+            f"mas retornou {type(dados).__name__}."
+        )
+
+    campos_obrigatorios = ("df", "bgs", "fontes")
+    ausentes = [campo for campo in campos_obrigatorios if campo not in dados]
+    if ausentes:
+        raise KeyError(
+            "O retorno de carregar_cenario() não contém os campos esperados: "
+            + ", ".join(ausentes)
+        )
+
+    df = dados["df"]
+    bgs = dados["bgs"]
+    fontes = dados["fontes"]
+
+    print("Cenário importado com sucesso!")
+    print("Aba utilizada:", dados.get("aba"))
+    print("Linha do cabeçalho:", dados.get("header_row"))
+    print("Quantidade de linhas:", len(df))
+    print("Quantidade de colunas:", len(df.columns))
+    print("Colunas:", list(df.columns))
+    print("Matriz de fundos:", len(bgs), "linhas")
+    print("Matriz de fontes:", len(fontes), "linhas")
+
+    return dados
+
+
 # ============================================================
 # EXECUÇÃO PRINCIPAL
 # ============================================================
@@ -564,19 +616,15 @@ def main() -> None:
             codigo_cenario=cenario.get("codigo") or "HO",
         )
 
-        # ========================================================
-        # IMPORTAR CENÁRIO EXPORTADO PARA O PYTHON
-        # ========================================================
+        # Importa o Excel baixado. O carregador retorna um dicionário com
+        # DataFrame, cores, fontes e metadados da planilha.
+        dados_cenario = importar_cenario_python(caminho)
+        df_cenario = dados_cenario["df"]
+        bgs_cenario = dados_cenario["bgs"]
+        fontes_cenario = dados_cenario["fontes"]
 
-        print("\n========== IMPORTANDO CENÁRIO PARA O PYTHON ==========")
-
-        df_cenario, bgs_cenario, fontes_cenario = carregar_cenario(
-            str(caminho)
-        )
-
-        print("Cenário importado com sucesso!")
-        print("Quantidade de linhas:", len(df_cenario))
-        print("Colunas:", list(df_cenario.columns))
+        # As variáveis acima ficam prontas para a próxima etapa:
+        # executar as regras de regras_cenario.py.
 
         print("\n========== PROCESSO FINALIZADO ==========")
         print("Planejamento:", planejamento.get("nome"))

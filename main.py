@@ -4,6 +4,9 @@ import time
 import traceback
 import copy
 import unicodedata
+import io
+import zipfile
+import requests
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +34,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QInputDialog,
+    QLineEdit,
     QProgressDialog,
     QPushButton,
     QTableView,
@@ -859,6 +864,203 @@ class Execucao(QObject):
 
 
 # ============================================================
+# INTEGRAÇÃO OPT+Z (CONSULTA E EXPORTAÇÃO OFICIAL)
+# ============================================================
+
+OPTZ_URL_LOGIN = "http://optz2.integra.itg:5002/signin"
+OPTZ_URL_API = "http://optz2.integra.itg:5000"
+OPTZ_URL_EXPORTACOES = "http://optz2.integra.itg:5005"
+OPTZ_CONTA = "jca"
+OPTZ_TIMEOUT = 30
+OPTZ_TIMEOUT_DOWNLOAD = 120
+OPTZ_INTERVALO_CONSULTA = 5
+OPTZ_TEMPO_MAXIMO_ESPERA = 1500  # 25 minutos
+OPTZ_MODELO_EXPORTACAO = 1
+
+
+def _optz_json(resposta, contexto):
+    try:
+        dados = resposta.json()
+    except ValueError as erro:
+        raise ValueError(
+            f"{contexto}: resposta da API não é JSON válido: "
+            f"{(resposta.text or '')[:500]}"
+        ) from erro
+    if not isinstance(dados, dict):
+        raise ValueError(f"{contexto}: formato de resposta inesperado.")
+    return dados
+
+
+def _optz_autenticar(session, usuario, senha):
+    resposta = session.post(
+        OPTZ_URL_LOGIN,
+        json={"conta": OPTZ_CONTA, "usuario": usuario, "senha": senha},
+        headers={"Accept": "application/json"},
+        timeout=OPTZ_TIMEOUT,
+    )
+    resposta.raise_for_status()
+    retorno = _optz_json(resposta, "Autenticação OPT+Z")
+    token = (retorno.get("data") or {}).get("accessToken")
+    if not token:
+        raise ValueError("O OPT+Z não retornou accessToken no login.")
+    session.headers.update({"Authorization": f"Bearer {token}", "Accept": "application/json"})
+
+
+def _optz_listar_planejamentos(session):
+    itens = []
+    pagina = 1
+    while True:
+        resposta = session.get(
+            f"{OPTZ_URL_API}/planejamentos",
+            params={"limit": 50, "page": pagina, "pesquisa": "", "sort": "nome:asc"},
+            timeout=OPTZ_TIMEOUT,
+        )
+        resposta.raise_for_status()
+        retorno = _optz_json(resposta, "Consulta de planejamentos")
+        registros = retorno.get("data", [])
+        if not isinstance(registros, list):
+            raise ValueError("A API retornou uma lista de planejamentos inválida.")
+        if not registros:
+            break
+        itens.extend(registros)
+        total = retorno.get("total")
+        if (total is not None and len(itens) >= int(total)) or len(registros) < 50:
+            break
+        pagina += 1
+    if not itens:
+        raise ValueError("Nenhum planejamento foi encontrado no OPT+Z.")
+    return itens
+
+
+def _optz_ultimo_cenario_ho(session, planejamento_id):
+    pagina = 1
+    while True:
+        resposta = session.get(
+            f"{OPTZ_URL_API}/cenarios",
+            params={
+                "limit": 20, "page": pagina, "pesquisa": "",
+                "planejamentoId": planejamento_id, "sort": "criadoEm:desc",
+            },
+            timeout=OPTZ_TIMEOUT,
+        )
+        resposta.raise_for_status()
+        retorno = _optz_json(resposta, "Consulta de cenários")
+        cenarios = retorno.get("data", [])
+        if not isinstance(cenarios, list):
+            raise ValueError("A API retornou uma lista de cenários inválida.")
+        if not cenarios:
+            break
+        # Ordenação criadaEm:desc: o primeiro código terminado em HO é o mais recente.
+        for cenario in cenarios:
+            codigo = str(cenario.get("codigo") or "").strip()
+            if codigo.upper().endswith("HO"):
+                if not cenario.get("id"):
+                    raise ValueError("O cenário HO encontrado não possui identificador.")
+                return cenario
+        total = retorno.get("total")
+        if (total is not None and pagina * 20 >= int(total)) or len(cenarios) < 20:
+            break
+        pagina += 1
+    raise ValueError("Não foi encontrado cenário cujo código termine em HO nesse planejamento.")
+
+
+def _optz_solicitar_exportacao(session, cenario_id):
+    resposta = session.post(
+        f"{OPTZ_URL_EXPORTACOES}/exportacoes/entidade/cenario",
+        params={"confirmed": "false"},
+        json={"cenarioId": cenario_id, "modelo": OPTZ_MODELO_EXPORTACAO},
+        timeout=OPTZ_TIMEOUT,
+    )
+    resposta.raise_for_status()
+    retorno = _optz_json(resposta, "Solicitação de exportação")
+    dados = retorno.get("data") or {}
+    exportacao_id = dados.get("id") or dados.get("exportacaoId")
+    if not exportacao_id:
+        raise ValueError(f"A API não retornou o ID da exportação. Campos: {list(dados)}")
+    return str(exportacao_id)
+
+
+def _optz_baixar_ate_concluir(session, exportacao_id, codigo_cenario, progresso=None):
+    url = f"{OPTZ_URL_EXPORTACOES}/exportacoes/{exportacao_id}"
+    inicio = time.monotonic()
+    ultimo_erro = "arquivo ainda indisponível"
+    while time.monotonic() - inicio <= OPTZ_TEMPO_MAXIMO_ESPERA:
+        resposta = session.get(
+            url,
+            headers={"Accept": "application/octet-stream, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, */*"},
+            timeout=OPTZ_TIMEOUT_DOWNLOAD,
+        )
+        if resposta.status_code == 200 and resposta.content:
+            conteudo = resposta.content
+            try:
+                with zipfile.ZipFile(io.BytesIO(conteudo)) as zf:
+                    nomes = set(zf.namelist())
+                    if "xl/workbook.xml" not in nomes:
+                        raise ValueError("A resposta não contém uma pasta de trabalho XLSX válida.")
+                    corrompido = zf.testzip()
+                    if corrompido:
+                        raise ValueError(f"Arquivo XLSX corrompido: {corrompido}")
+            except zipfile.BadZipFile:
+                trecho = conteudo[:500].decode("utf-8", errors="replace")
+                ultimo_erro = trecho or "resposta não é um XLSX"
+            else:
+                pasta = Path.cwd() / "exportacoes_optz"
+                pasta.mkdir(parents=True, exist_ok=True)
+                nome = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(codigo_cenario or "CENARIO_HO"))
+                destino = pasta / f"CENARIO_{nome}.xlsx"
+                destino.write_bytes(conteudo)
+                return destino
+        else:
+            try:
+                erro_json = resposta.json()
+                erros = erro_json.get("errors", []) if isinstance(erro_json, dict) else []
+                ultimo_erro = "; ".join(map(str, erros)) if isinstance(erros, list) else str(erros)
+            except ValueError:
+                ultimo_erro = (resposta.text or f"HTTP {resposta.status_code}")[:500]
+            # A resposta 400 com 'Exportação não concluída' é esperada durante o processamento.
+            normalizado = unicodedata.normalize("NFKD", ultimo_erro).encode("ascii", "ignore").decode().lower()
+            if resposta.status_code == 400 and not any(
+                termo in normalizado
+                for termo in ("exportacao nao concluida", "arquivo nao disponivel", "ainda processando")
+            ):
+                resposta.raise_for_status()
+            if resposta.status_code not in (202, 400, 404, 409, 425) and resposta.status_code >= 400:
+                resposta.raise_for_status()
+        decorrido = int(time.monotonic() - inicio)
+        if progresso:
+            progresso(min(95, int(decorrido * 95 / OPTZ_TEMPO_MAXIMO_ESPERA)),
+                      f"Aguardando geração do arquivo no OPT+Z ({decorrido // 60} min)…")
+        time.sleep(OPTZ_INTERVALO_CONSULTA)
+    raise TimeoutError(
+        f"O OPT+Z não disponibilizou o XLSX em 25 minutos. Última resposta: {ultimo_erro}"
+    )
+
+
+def importar_cenario_optz(usuario, senha, planejamento_id, progresso=None):
+    """Solicita exportação oficial do cenário HO mais recente e carrega o XLSX."""
+    with requests.Session() as session:
+        if progresso:
+            progresso(2, "Autenticando no OPT+Z…")
+        _optz_autenticar(session, usuario, senha)
+        if progresso:
+            progresso(5, "Localizando o cenário HO mais recente…")
+        cenario = _optz_ultimo_cenario_ho(session, planejamento_id)
+        if progresso:
+            progresso(8, f"Solicitando exportação de {cenario.get('codigo')}…")
+        exportacao_id = _optz_solicitar_exportacao(session, cenario["id"])
+        caminho = _optz_baixar_ate_concluir(
+            session, exportacao_id, cenario.get("codigo") or "HO", progresso
+        )
+    if progresso:
+        progresso(97, "Importando planilha exportada…")
+    dados = carregar_cenario(str(caminho))
+    dados["caminho"] = str(caminho)
+    dados["origem_optz"] = True
+    dados["cenario_optz"] = cenario
+    return dados
+
+
+# ============================================================
 # ABA IMPORTADOR
 # ============================================================
 
@@ -866,6 +1068,7 @@ class AbaImportador(QWidget):
     """Importa Excel: o cabeçalho é localizado automaticamente."""
 
     importado = Signal()
+    importar_optz_solicitado = Signal()
 
     def __init__(self, texto_botao: str, tipo: str):
 
@@ -896,6 +1099,11 @@ class AbaImportador(QWidget):
         self.botao_importar.clicked.connect(
             self.escolher_arquivo
         )
+
+        self.botao_optz = None
+        if self.tipo == "cen":
+            self.botao_optz = QPushButton("Importar do OPT+Z")
+            self.botao_optz.clicked.connect(lambda _checked=False: self.importar_optz_solicitado.emit())
 
         self.label_arquivo = QLabel(
             "Nenhum arquivo selecionado"
@@ -930,6 +1138,8 @@ class AbaImportador(QWidget):
         layout = QVBoxLayout(self)
 
         layout.addWidget(self.botao_importar)
+        if self.botao_optz is not None:
+            layout.addWidget(self.botao_optz)
         layout.addWidget(self.label_arquivo)
         layout.addWidget(self.tabela)
 
@@ -1111,6 +1321,10 @@ class JanelaPrincipal(QWidget):
             "cen"
         )
 
+        self.aba_cenario.importar_optz_solicitado.connect(
+            self.importar_cenario_optz
+        )
+
         # Nova importação invalida o resultado anterior.
         self.aba_timetable.importado.connect(
             self._invalidar_resultado
@@ -1228,6 +1442,115 @@ class JanelaPrincipal(QWidget):
             err,
             on_progress
         ).iniciar()
+
+    # --------------------------------------------------------
+    # IMPORTAR CENÁRIO DIRETAMENTE DO OPT+Z
+    # --------------------------------------------------------
+
+    def importar_cenario_optz(self):
+        usuario, ok = QInputDialog.getText(
+            self, "Conectar ao OPT+Z", "Usuário OPT+Z:"
+        )
+        if not ok or not usuario.strip():
+            return
+        senha, ok = QInputDialog.getText(
+            self, "Conectar ao OPT+Z", "Senha OPT+Z:", QLineEdit.Password
+        )
+        if not ok or not senha:
+            return
+
+        self.label_status.setText("Conectando ao OPT+Z e consultando planejamentos…")
+        self.aba_cenario.botao_optz.setEnabled(False)
+
+        def buscar():
+            with requests.Session() as session:
+                _optz_autenticar(session, usuario.strip(), senha)
+                return _optz_listar_planejamentos(session)
+
+        def sucesso_planejamentos(planejamentos):
+            self.aba_cenario.botao_optz.setEnabled(True)
+            opcoes = []
+            for item in planejamentos:
+                empresa = (item.get("empresa") or {}).get("codigo") or ""
+                opcoes.append(
+                    f"{len(opcoes) + 1:02d} - {item.get('nome') or 'Sem nome'} | "
+                    f"Empresa: {empresa} | Cenários: {item.get('numCenarios', 'N/I')}"
+                )
+            escolha, ok = QInputDialog.getItem(
+                self, "Selecionar planejamento OPT+Z",
+                "Escolha o planejamento:", opcoes, 0, False
+            )
+            if not ok or not escolha:
+                self.label_status.setText("Importação do OPT+Z cancelada.")
+                return
+            indice = opcoes.index(escolha)
+            planejamento = planejamentos[indice]
+            planejamento_id = planejamento.get("id")
+            if not planejamento_id:
+                QMessageBox.critical(self, "OPT+Z", "O planejamento selecionado não possui ID.")
+                return
+            self._iniciar_importacao_optz(usuario.strip(), senha, planejamento_id, planejamento)
+
+        def erro_planejamentos(msg):
+            self.aba_cenario.botao_optz.setEnabled(True)
+            self.label_status.setText("Falha ao consultar planejamentos no OPT+Z.")
+            QMessageBox.critical(self, "Erro OPT+Z", msg)
+
+        self._rodar(
+            buscar, sucesso_planejamentos, erro_planejamentos,
+            botao_bloquear=self.aba_cenario.botao_optz
+        )
+
+    def _iniciar_importacao_optz(self, usuario, senha, planejamento_id, planejamento):
+        dlg = QProgressDialog(
+            "Iniciando importação…", "", 0, 100, self
+        )
+        dlg.setCancelButton(None)
+        dlg.setWindowTitle("Importar cenário do OPT+Z")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.show()
+
+        def tarefa(progresso):
+            return importar_cenario_optz(
+                usuario, senha, planejamento_id, progresso=progresso
+            )
+
+        def progresso(pct, mensagem):
+            dlg.setValue(pct)
+            dlg.setLabelText(f"{mensagem} ({pct}%)")
+
+        def sucesso(dados):
+            dlg.setValue(100)
+            dlg.close()
+            self.aba_cenario._aplicar_carga(dados)
+            self.abas.setCurrentWidget(self.aba_cenario)
+            self.label_status.setText(
+                f"Cenário importado do OPT+Z | Planejamento: {planejamento.get('nome')} | "
+                f"Cenário: {(dados.get('cenario_optz') or {}).get('codigo')} | "
+                f"Arquivo: {dados.get('caminho')}"
+            )
+            QMessageBox.information(
+                self, "Importação concluída",
+                "O cenário foi exportado pelo OPT+Z e importado para o Python.\n\n"
+                f"Planejamento: {planejamento.get('nome')}\n"
+                f"Cenário: {(dados.get('cenario_optz') or {}).get('codigo')}\n"
+                f"Arquivo: {dados.get('caminho')}\n\n"
+                "Nenhum dado do cenário foi alterado na plataforma."
+            )
+
+        def erro(mensagem):
+            dlg.close()
+            self.label_status.setText("Falha ao importar cenário do OPT+Z.")
+            QMessageBox.critical(self, "Erro na importação OPT+Z", mensagem)
+
+        self._rodar(
+            tarefa, sucesso, erro,
+            botao_bloquear=self.aba_cenario.botao_optz,
+            on_progress=progresso,
+        )
 
     # --------------------------------------------------------
     # APLICAR ALTERAÇÕES
