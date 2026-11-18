@@ -13,7 +13,8 @@ Integração no main.py:
     janela.show()
 
 O fundo usa gradientes radiais animados com transições suaves para criar um
-efeito de blur em movimento nas cores azul, coral e verde-água.
+efeito de blur em movimento nas cores coral e verde-água. Cada mancha
+percorre a tela inteira seguindo uma curva de Lissajous.
 """
 
 import math
@@ -66,11 +67,15 @@ OPACIDADE_ABA_SELECIONADA = 145
 # Intensidade das manchas de cor do fundo (0 a 255).
 INTENSIDADE_BLUR = 115
 
+# Tamanho das manchas em relação ao menor lado da janela (1.0 = tamanho base).
+TAMANHO_BLUR = 1.25
+
 # Animação do fundo. Defina ANIMACAO_ATIVA = False para deixar as manchas paradas.
 ANIMACAO_ATIVA = True
-INTERVALO_ANIMACAO_MS = 40  # aproximadamente 25 atualizações por segundo
-VELOCIDADE_ANIMACAO = 0.05  # menor = movimento mais lento
-AMPLITUDE_MOVIMENTO = 0.12  # deslocamento em proporção à largura/altura da janela
+INTERVALO_ANIMACAO_MS = 33          # ~30 fps
+VELOCIDADE_ANIMACAO = 0.01          # maior = mais rápido
+AMPLITUDE_X = 0.50                  # 0.5 = o centro vai de borda a borda
+AMPLITUDE_Y = 0.50
 
 
 # ============================================================
@@ -135,33 +140,27 @@ class FundoBlur(QWidget):
 
         # Cada mancha usa um gradiente radial que desaparece gradualmente.
         # Isso cria a aparência de luz desfocada sem precisar de uma imagem.
-        # Cada mancha percorre uma trajetória própria, com deslocamento
-        # senoidal para evitar movimentos bruscos ou lineares.
         fase = self._fase if ANIMACAO_ATIVA else 0.0
-        amp = AMPLITUDE_MOVIMENTO
+
+        # Cada mancha percorre a tela inteira numa curva de Lissajous.
+        # Frequências diferentes em X e Y (e entre as manchas) evitam que o
+        # movimento pareça uma repetição simples.
+        # (cor, freq_x, fase_x, freq_y, fase_y, raio, intensidade)
+        escala = menor_lado * TAMANHO_BLUR
+        trajetorias = [
+            (CORES["coral"],      0.59, 2.1, 0.67, 4.2, escala * 0.72, 0.92),
+            (CORES["verde_agua"], 0.47, 4.0, 0.61, 2.6, escala * 0.82, 1.00),
+        ]
+
         manchas = [
-            # Cor, posição X, posição Y, raio, intensidade relativa
             (
-                CORES["primaria"],
-                0.04 + amp * 0.85 * math.sin(fase * 0.72),
-                0.08 + amp * 0.75 * math.cos(fase * 0.61),
-                menor_lado * 0.78,
-                1.00,
-            ),
-            (
-                CORES["coral"],
-                0.98 + amp * 0.80 * math.sin(fase * 0.57 + 2.1),
-                0.20 + amp * 0.90 * math.cos(fase * 0.69 + 1.2),
-                menor_lado * 0.72,
-                0.92,
-            ),
-            (
-                CORES["verde_agua"],
-                0.72 + amp * 0.90 * math.sin(fase * 0.63 + 4.0),
-                1.02 + amp * 0.80 * math.cos(fase * 0.54 + 3.0),
-                menor_lado * 0.82,
-                1.00,
-            ),
+                cor,
+                0.5 + AMPLITUDE_X * math.sin(fase * fx + px),
+                0.5 + AMPLITUDE_Y * math.cos(fase * fy + py),
+                raio,
+                intensidade,
+            )
+            for cor, fx, px, fy, py, raio, intensidade in trajetorias
         ]
 
         for cor_hex, pos_x, pos_y, raio, intensidade in manchas:
