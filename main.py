@@ -1,5 +1,6 @@
 
 import sys
+import pandas as pd
 import time
 import traceback
 import copy
@@ -7,15 +8,13 @@ import unicodedata
 import io
 import zipfile
 import requests
-
+from estilo_app import aplicar_estilo, aplicar_fundo_blur
 from dataclasses import dataclass
 from pathlib import Path
-
-import pandas as pd
-
+PASTA_APP = Path(__file__).resolve().parent
+CAMINHO_ICONE = PASTA_APP / "assets" / "logo.ico"
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
-
 from PySide6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
@@ -25,9 +24,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-
-from PySide6.QtGui import QColor
-
+from PySide6.QtGui import (QColor, QIcon)
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -43,13 +40,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from excel_io import (
     carregar_cenario,
     carregar_timetable,
     salvar_cenario,
 )
-
 from regras_cenario import _processar as processar_em_memoria
 
 
@@ -1307,6 +1302,8 @@ class JanelaPrincipal(QWidget):
             "Importador de Excel - TimeTable e Cenário"
         )
 
+        self.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
+
         self.resize(1100, 700)
 
         self.resultado: ResultadoProcessamento | None = None
@@ -1824,11 +1821,10 @@ class JanelaPrincipal(QWidget):
 # ============================================================
 
 if __name__ == "__main__":
-
     app = QApplication(sys.argv)
-
+    app.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
+    aplicar_estilo(app)
     janela = JanelaPrincipal()
-
+    aplicar_fundo_blur(janela)
     janela.show()
-
     sys.exit(app.exec())
