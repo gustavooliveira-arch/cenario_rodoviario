@@ -2717,12 +2717,16 @@ class JanelaPrincipal(QWidget):
 # INICIALIZAÇÃO
 # ============================================================
 
+# Aplicação Flask
+web_app = Flask(__name__)
+
+
+# Inicialização da aplicação desktop
 if __name__ == "__main__":
-    app = Flask(__name__)
-    app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
-    aplicar_estilo(app)
+    qt_app = QApplication(sys.argv)
+    qt_app.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
+    aplicar_estilo(qt_app)
     janela = JanelaPrincipal()
     aplicar_fundo_blur(janela)
     janela.show()
-    sys.exit(app.exec())
+    sys.exit(qt_app.exec())
