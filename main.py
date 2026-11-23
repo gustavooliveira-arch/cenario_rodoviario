@@ -6,8 +6,15 @@ import unicodedata
 import io
 import zipfile
 import requests
+from collections import Counter
 
-from estilo_app import aplicar_estilo, aplicar_fundo_blur
+from estilo_app import (
+    aplicar_estilo,
+    aplicar_fundo_blur,
+    DialogoProgressoLinha,
+    QInputDialog,
+    QMessageBox,
+)
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,27 +28,42 @@ from PySide6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
     QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSortFilterProxyModel,
     Qt,
     QThread,
+    QTimer,
     Signal,
     Slot,
 )
 
-from PySide6.QtGui import QColor, QBrush, QIcon
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPen,
+    QPolygonF,
+)
 
 from PySide6.QtWidgets import (
     QApplication,
-    QDialog,
+    QCheckBox,
     QFileDialog,
     QFrame,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
-    QMessageBox,
-    QInputDialog,
     QLineEdit,
-    QProgressBar,
-    QProgressDialog,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
     QTableView,
     QTabWidget,
     QVBoxLayout,
@@ -131,8 +153,57 @@ def _cor_hex(valor, padrao="#FFFFFF"):
     return padrao
 
 
+def _normalizar_cor(valor, padrao=None):
+    """Converte qualquer cor lida do Excel para #RRGGBB.
+
+    Usa a mesma regra das células (últimos 6 dígitos do ARGB/RGB), para que
+    cabeçalhos e células mostrem exatamente a mesma cor do arquivo.
+    """
+    if valor is None:
+        return padrao
+
+    if hasattr(valor, "name") and callable(valor.name):
+        try:
+            valor = valor.name()
+        except Exception:
+            pass
+
+    texto = str(valor).strip().lstrip("#")
+
+    if len(texto) in (6, 8) and all(
+        c in "0123456789abcdefABCDEF" for c in texto
+    ):
+        return "#" + texto[-6:].upper()
+
+    return padrao
+
+
+def _normalizar_texto(valor):
+    """Texto para comparação de filtros: sem acento e sem diferença de caixa."""
+    if valor is None:
+        return ""
+
+    try:
+        if valor != valor:  # NaN
+            return ""
+    except Exception:
+        pass
+
+    texto = str(valor)
+
+    if not texto.isascii():
+        texto = unicodedata.normalize("NFKD", texto)
+        texto = "".join(c for c in texto if not unicodedata.combining(c))
+
+    return texto.casefold()
+
+
 def _ler_estilos_cabecalho_excel(caminho, nome_aba, linha_cabecalho, quantidade_colunas):
-    """Lê as cores reais do cabeçalho no Excel, incluindo cores de tema/tint."""
+    """Lê as cores reais do cabeçalho no Excel, incluindo cores de tema/tint.
+
+    As cores das células já vêm de carregar_cenario/carregar_timetable
+    (excel_io), que usam as mesmas funções cor_preenchimento e cor_fonte.
+    """
     if not caminho or not nome_aba or not linha_cabecalho or quantidade_colunas <= 0:
         return [], []
 
@@ -155,6 +226,16 @@ def _ler_estilos_cabecalho_excel(caminho, nome_aba, linha_cabecalho, quantidade_
         return fundos, fontes
     finally:
         wb.close()
+
+
+def _aplicar_estilos_cabecalho(dados, caminho):
+    """Acrescenta a dados as cores do cabeçalho lidas do Excel."""
+    dados["header_bgs"], dados["header_fontes"] = _ler_estilos_cabecalho_excel(
+        caminho,
+        dados["aba"],
+        dados["header_row"],
+        len(dados["df"].columns),
+    )
 
 
 # ============================================================
@@ -1115,15 +1196,579 @@ def importar_cenario_optz(usuario, senha, planejamento_id, progresso=None):
         progresso(97, "Importando planilha exportada…")
     dados = carregar_cenario(str(caminho))
     dados["caminho"] = str(caminho)
-    dados["header_bgs"], dados["header_fontes"] = _ler_estilos_cabecalho_excel(
-        str(caminho),
-        dados["aba"],
-        dados["header_row"],
-        len(dados["df"].columns),
-    )
+    _aplicar_estilos_cabecalho(dados, str(caminho))
     dados["origem_optz"] = True
     dados["cenario_optz"] = cenario
     return dados
+
+
+# ============================================================
+# FILTRO POR COLUNA (ESTILO EXCEL / GOOGLE SHEETS)
+# ============================================================
+
+ESPACO_ICONE_FILTRO = 26
+
+
+def _texto_celula(valor):
+    """Mesmo texto que a tabela exibe na célula."""
+    if valor is None:
+        return ""
+
+    try:
+        if valor != valor:  # NaN
+            return ""
+    except Exception:
+        pass
+
+    return str(valor)
+
+
+def _chave_ordenacao(texto):
+    """Números primeiro (em ordem numérica), depois textos, vazias por último."""
+    if texto == "":
+        return (2, 0.0, "")
+
+    try:
+        return (0, float(texto), "")
+    except ValueError:
+        return (1, 0.0, _normalizar_texto(texto))
+
+
+class FiltroLinhas(QSortFilterProxyModel):
+    """Filtro por coluna: cada coluna aceita um conjunto de valores marcados.
+
+    Filtros em várias colunas funcionam como E. Os dados originais não mudam;
+    apenas as linhas são ocultadas na visualização.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self._selecoes = {}   # {coluna: set(textos permitidos)}
+        self._mascaras = {}   # {coluna: [bool por linha]}
+        self._mascara = None  # combinação (E) de todas as colunas
+        self._textos = {}     # cache: {coluna: [texto por linha]}
+
+    def setSourceModel(self, modelo):
+        super().setSourceModel(modelo)
+        # Dados novos invalidam filtros e cache.
+        modelo.modelAboutToBeReset.connect(self._limpar_tudo)
+
+    def _limpar_tudo(self):
+        self._selecoes = {}
+        self._mascaras = {}
+        self._mascara = None
+        self._textos = {}
+
+    def _df(self):
+        modelo = self.sourceModel()
+        return None if modelo is None else modelo.df
+
+    def textos_coluna(self, coluna):
+        textos = self._textos.get(coluna)
+
+        if textos is None:
+            textos = [
+                _texto_celula(v)
+                for v in self._df().iloc[:, coluna].tolist()
+            ]
+            self._textos[coluna] = textos
+
+        return textos
+
+    def coluna_filtrada(self, coluna):
+        return coluna in self._selecoes
+
+    def colunas_filtradas(self):
+        return sorted(self._selecoes)
+
+    def selecao(self, coluna):
+        return self._selecoes.get(coluna)
+
+    def valores_disponiveis(self, coluna):
+        """Contagem dos valores da coluna nas linhas que passam pelos
+        filtros das OUTRAS colunas (como no Excel)."""
+        textos = self.textos_coluna(coluna)
+
+        outras = [
+            m for c, m in self._mascaras.items()
+            if c != coluna
+        ]
+
+        if outras:
+            visiveis = [all(v) for v in zip(*outras)]
+            return Counter(
+                t for t, ok in zip(textos, visiveis) if ok
+            )
+
+        return Counter(textos)
+
+    def definir_selecao(self, coluna, selecionados):
+        """selecionados: conjunto de textos permitidos; None remove o filtro."""
+        if selecionados is None:
+            self._selecoes.pop(coluna, None)
+            self._mascaras.pop(coluna, None)
+        else:
+            permitidos = set(selecionados)
+            self._selecoes[coluna] = permitidos
+            self._mascaras[coluna] = [
+                t in permitidos
+                for t in self.textos_coluna(coluna)
+            ]
+
+        self._recalcular()
+
+    def limpar_filtros(self):
+        self._selecoes = {}
+        self._mascaras = {}
+        self._recalcular()
+
+    def _recalcular(self):
+        if not self._mascaras:
+            self._mascara = None
+        else:
+            self._mascara = [
+                all(v) for v in zip(*self._mascaras.values())
+            ]
+
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, linha_origem, pai):
+        mascara = self._mascara
+
+        if mascara is None or linha_origem >= len(mascara):
+            return True
+
+        return mascara[linha_origem]
+
+
+class _CheckSelecionarTudo(QCheckBox):
+    """Caixa de três estados: o clique alterna só entre marcado e desmarcado."""
+
+    def nextCheckState(self):
+        self.setCheckState(
+            Qt.Unchecked
+            if self.checkState() == Qt.Checked
+            else Qt.Checked
+        )
+
+
+class PopupFiltroColuna(QWidget):
+    """Janela de filtro de uma coluna: pesquisa, selecionar tudo e valores."""
+
+    # Conjunto de textos marcados, ou None para limpar o filtro da coluna.
+    aplicado = Signal(object)
+
+    def __init__(self, parent, valores, selecionados=None):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setFixedWidth(300)
+
+        self._itens = []  # (item, texto original, texto normalizado)
+
+        cartao = QFrame(self)
+        cartao.setObjectName("cartaoFiltro")
+
+        self.campo_busca = QLineEdit()
+        self.campo_busca.setPlaceholderText("Pesquisar…")
+        self.campo_busca.setClearButtonEnabled(True)
+
+        self.check_todos = _CheckSelecionarTudo("(Selecionar tudo)")
+        self.check_todos.setTristate(True)
+
+        self.lista = QListWidget()
+        self.lista.setUniformItemSizes(True)
+        self.lista.setSelectionMode(QListWidget.NoSelection)
+        self.lista.setMinimumHeight(240)
+
+        for texto in valores:
+            exibicao = texto if texto != "" else "(Vazias)"
+
+            item = QListWidgetItem(exibicao)
+            item.setFlags(Qt.ItemIsEnabled)
+            item.setCheckState(
+                Qt.Checked
+                if selecionados is None or texto in selecionados
+                else Qt.Unchecked
+            )
+
+            self.lista.addItem(item)
+            self._itens.append(
+                (item, texto, _normalizar_texto(exibicao))
+            )
+
+        botao_limpar = QPushButton("Limpar")
+        botao_cancelar = QPushButton("Cancelar")
+        botao_ok = QPushButton("OK")
+        botao_ok.setDefault(True)
+
+        linha_botoes = QHBoxLayout()
+        linha_botoes.addWidget(botao_limpar)
+        linha_botoes.addStretch(1)
+        linha_botoes.addWidget(botao_cancelar)
+        linha_botoes.addWidget(botao_ok)
+
+        interno = QVBoxLayout(cartao)
+        interno.setContentsMargins(10, 10, 10, 10)
+        interno.setSpacing(8)
+        interno.addWidget(self.campo_busca)
+        interno.addWidget(self.check_todos)
+        interno.addWidget(self.lista, 1)
+        interno.addLayout(linha_botoes)
+
+        externo = QVBoxLayout(self)
+        externo.setContentsMargins(0, 0, 0, 0)
+        externo.addWidget(cartao)
+
+        self.setStyleSheet("""
+            QFrame#cartaoFiltro {
+                background-color: rgba(255, 255, 255, 240);
+                border: 1px solid rgba(0, 0, 0, 40);
+                border-radius: 10px;
+            }
+            QListWidget {
+                background-color: #FFFFFF;
+                border: 1px solid #D9E1E8;
+                border-radius: 6px;
+                color: #263445;
+                outline: 0;
+            }
+            QCheckBox {
+                background: transparent;
+                color: #263445;
+            }
+            QPushButton {
+                padding: 5px 14px;
+                min-width: 60px;
+                min-height: 16px;
+            }
+        """)
+
+        # Pesquisa com pequena pausa para listas grandes.
+        self._timer_busca = QTimer(self)
+        self._timer_busca.setSingleShot(True)
+        self._timer_busca.setInterval(150)
+        self._timer_busca.timeout.connect(self._filtrar_lista)
+
+        self.campo_busca.textChanged.connect(
+            lambda _t: self._timer_busca.start()
+        )
+        self.campo_busca.returnPressed.connect(self._confirmar)
+        self.lista.itemClicked.connect(self._ao_clicar_item)
+        self.check_todos.clicked.connect(self._ao_clicar_todos)
+
+        botao_ok.clicked.connect(self._confirmar)
+        botao_cancelar.clicked.connect(self.close)
+        botao_limpar.clicked.connect(self._limpar)
+
+        self._atualizar_selecionar_tudo()
+
+    def _ao_clicar_item(self, item):
+        item.setCheckState(
+            Qt.Unchecked
+            if item.checkState() == Qt.Checked
+            else Qt.Checked
+        )
+        self._atualizar_selecionar_tudo()
+
+    def _ao_clicar_todos(self):
+        estado = (
+            Qt.Checked
+            if self.check_todos.checkState() == Qt.Checked
+            else Qt.Unchecked
+        )
+
+        # Age só sobre os itens visíveis (resultado da pesquisa).
+        for item, _texto, _norm in self._itens:
+            if not item.isHidden():
+                item.setCheckState(estado)
+
+        self._atualizar_selecionar_tudo()
+
+    def _atualizar_selecionar_tudo(self):
+        visiveis = [
+            item for item, _t, _n in self._itens
+            if not item.isHidden()
+        ]
+
+        marcados = sum(
+            1 for item in visiveis
+            if item.checkState() == Qt.Checked
+        )
+
+        if visiveis and marcados == len(visiveis):
+            estado = Qt.Checked
+        elif marcados == 0:
+            estado = Qt.Unchecked
+        else:
+            estado = Qt.PartiallyChecked
+
+        self.check_todos.setCheckState(estado)
+
+    def _filtrar_lista(self):
+        termo = _normalizar_texto(self.campo_busca.text().strip())
+
+        self.lista.setUpdatesEnabled(False)
+
+        for item, _texto, norm in self._itens:
+            item.setHidden(bool(termo) and termo not in norm)
+
+        self.lista.setUpdatesEnabled(True)
+
+        self._atualizar_selecionar_tudo()
+
+    def _confirmar(self):
+        marcados = {
+            texto
+            for item, texto, _n in self._itens
+            if item.checkState() == Qt.Checked
+        }
+
+        self.aplicado.emit(marcados)
+        self.close()
+
+    def _limpar(self):
+        self.aplicado.emit(None)
+        self.close()
+
+
+class CabecalhoColorido(QHeaderView):
+    """Cabeçalho com a cor do Excel e botão de filtro em cada coluna.
+
+    O fundo e o texto são desenhados diretamente (o QHeaderView costuma
+    ignorar o BackgroundRole quando há QSS), e o botão de filtro fica no
+    canto direito de cada seção.
+    """
+
+    filtro_clicado = Signal(int)
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+
+        self._coluna_filtrada = lambda coluna: False
+        self._ignorar_soltar = False
+
+        self.setMouseTracking(True)
+        self.setHighlightSections(False)
+
+    def definir_funcao_filtrada(self, funcao):
+        self._coluna_filtrada = funcao
+
+    # --- geometria do botão -------------------------------------
+
+    def _rect_secao(self, coluna):
+        return QRect(
+            self.sectionViewportPosition(coluna),
+            0,
+            self.sectionSize(coluna),
+            self.height(),
+        )
+
+    @staticmethod
+    def _rect_icone(rect):
+        return QRect(rect.right() - 22, rect.center().y() - 9, 18, 18)
+
+    def _sobre_icone(self, pos):
+        coluna = self.logicalIndexAt(pos)
+
+        if coluna < 0:
+            return -1
+
+        area = self._rect_icone(self._rect_secao(coluna)).adjusted(-3, -3, 3, 3)
+
+        return coluna if area.contains(pos) else -1
+
+    # --- mouse --------------------------------------------------
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            coluna = self._sobre_icone(event.position().toPoint())
+
+            if coluna >= 0:
+                self._ignorar_soltar = True
+                event.accept()
+                self.filtro_clicado.emit(coluna)
+                return
+
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._ignorar_soltar:
+            self._ignorar_soltar = False
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._sobre_icone(event.position().toPoint()) >= 0:
+            self.viewport().setCursor(Qt.PointingHandCursor)
+        else:
+            self.viewport().unsetCursor()
+
+        super().mouseMoveEvent(event)
+
+    # --- desenho ------------------------------------------------
+
+    def paintSection(self, painter, rect, logicalIndex):
+
+        modelo = self.model()
+
+        if modelo is None or not rect.isValid():
+            super().paintSection(painter, rect, logicalIndex)
+            return
+
+        fundo = modelo.headerData(
+            logicalIndex, self.orientation(), Qt.BackgroundRole
+        )
+
+        if not isinstance(fundo, QBrush):
+            super().paintSection(painter, rect, logicalIndex)
+            self._desenhar_icone(painter, rect, logicalIndex, QColor("#EEEEEE"))
+            return
+
+        frente = modelo.headerData(
+            logicalIndex, self.orientation(), Qt.ForegroundRole
+        )
+
+        cor_texto = (
+            frente.color()
+            if isinstance(frente, QBrush)
+            else QColor("#000000")
+        )
+
+        texto = str(
+            modelo.headerData(
+                logicalIndex, self.orientation(), Qt.DisplayRole
+            ) or ""
+        )
+
+        painter.save()
+
+        painter.fillRect(rect, fundo)
+
+        painter.setPen(QPen(QColor(0, 0, 0, 60)))
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+
+        area = rect.adjusted(6, 0, -ESPACO_ICONE_FILTRO, 0)
+
+        painter.setPen(cor_texto)
+        painter.drawText(
+            area,
+            Qt.AlignCenter,
+            QFontMetrics(self.font()).elidedText(
+                texto, Qt.ElideRight, max(0, area.width())
+            ),
+        )
+
+        painter.restore()
+
+        self._desenhar_icone(painter, rect, logicalIndex, fundo.color())
+
+    def _desenhar_icone(self, painter, rect, coluna, cor_base):
+
+        if rect.width() < 34:
+            return
+
+        caixa = QRectF(self._rect_icone(rect))
+        centro = caixa.center()
+
+        filtrada = bool(self._coluna_filtrada(coluna))
+
+        claro = (
+            0.299 * cor_base.red()
+            + 0.587 * cor_base.green()
+            + 0.114 * cor_base.blue()
+        ) > 140
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+
+        if filtrada:
+            # Coluna filtrada: botão destacado e ícone de funil.
+            painter.setBrush(QColor(118, 177, 178, 240))
+            painter.drawRoundedRect(caixa, 4, 4)
+
+            painter.setBrush(QColor("#0E3862"))
+            painter.drawPolygon(QPolygonF([
+                QPointF(centro.x() - 5, centro.y() - 4),
+                QPointF(centro.x() + 5, centro.y() - 4),
+                QPointF(centro.x() + 1, centro.y() + 0.5),
+                QPointF(centro.x() + 1, centro.y() + 5),
+                QPointF(centro.x() - 1, centro.y() + 3.5),
+                QPointF(centro.x() - 1, centro.y() + 0.5),
+            ]))
+        else:
+            painter.setBrush(
+                QColor(255, 255, 255, 120 if claro else 60)
+            )
+            painter.drawRoundedRect(caixa, 4, 4)
+
+            painter.setBrush(
+                QColor("#263445") if claro else QColor("#FFFFFF")
+            )
+            painter.drawPolygon(QPolygonF([
+                QPointF(centro.x() - 4, centro.y() - 2),
+                QPointF(centro.x() + 4, centro.y() - 2),
+                QPointF(centro.x(), centro.y() + 3),
+            ]))
+
+        painter.restore()
+
+
+# ============================================================
+# DELEGATE DAS CÉLULAS (COR DE FUNDO E DE FONTE DO EXCEL)
+# ============================================================
+
+class DelegateCelulaColorida(QStyledItemDelegate):
+    """Pinta fundo e texto das células com as cores do modelo.
+
+    Com o QSS global (QTableView::item), o Qt pode ignorar BackgroundRole e
+    ForegroundRole. Este delegate desenha as células diretamente, então a cor
+    exibida é sempre a lida do Excel.
+    """
+
+    def paint(self, painter, option, index):
+
+        fundo = index.data(Qt.BackgroundRole)
+        frente = index.data(Qt.ForegroundRole)
+
+        if isinstance(fundo, QBrush):
+            fundo = fundo.color()
+
+        if isinstance(frente, QBrush):
+            frente = frente.color()
+
+        painter.save()
+
+        if fundo is not None:
+            painter.fillRect(option.rect, QColor(fundo))
+
+        # Seleção como véu translúcido: a cor do Excel continua visível.
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, QColor(118, 177, 178, 90))
+
+        texto = index.data(Qt.DisplayRole)
+
+        if texto:
+            area = option.rect.adjusted(6, 0, -6, 0)
+
+            painter.setFont(option.font)
+            painter.setPen(
+                QColor(frente) if frente is not None else QColor("#000000")
+            )
+            painter.drawText(
+                area,
+                Qt.AlignCenter,
+                option.fontMetrics.elidedText(
+                    str(texto), Qt.ElideRight, max(0, area.width())
+                ),
+            )
+
+        painter.restore()
 
 
 # ============================================================
@@ -1181,11 +1826,41 @@ class AbaImportador(QWidget):
 
         self.modelo = PlanilhaModel()
 
+        # A tabela exibe o modelo filtrado (proxy), sem alterar os dados.
+        self.filtro = FiltroLinhas(self)
+        self.filtro.setSourceModel(self.modelo)
+
         self.tabela = QTableView()
 
-        self.tabela.setModel(
-            self.modelo
+        cabecalho_colorido = CabecalhoColorido(Qt.Horizontal, self.tabela)
+        cabecalho_colorido.definir_funcao_filtrada(
+            self.filtro.coluna_filtrada
         )
+        cabecalho_colorido.filtro_clicado.connect(
+            self._abrir_filtro_coluna
+        )
+
+        self.tabela.setHorizontalHeader(cabecalho_colorido)
+
+        self.tabela.setModel(
+            self.filtro
+        )
+
+        self.tabela.setItemDelegate(
+            DelegateCelulaColorida(self.tabela)
+        )
+
+        self.label_filtros = QLabel("")
+        self.label_filtros.setWordWrap(True)
+
+        self.botao_limpar_filtros = QPushButton("Limpar filtros")
+        self.botao_limpar_filtros.setEnabled(False)
+
+        self.botao_limpar_filtros.clicked.connect(
+            self._limpar_filtros
+        )
+
+        self._popup_filtro = None
 
         self.tabela.setEditTriggers(
             QTableView.NoEditTriggers
@@ -1194,6 +1869,8 @@ class AbaImportador(QWidget):
         self.tabela.setAlternatingRowColors(False)
 
         self.tabela.verticalHeader().setDefaultSectionSize(22)
+        # Mantém a faixa dos números das linhas branca mesmo ao selecionar uma linha.
+        self.tabela.verticalHeader().setHighlightSections(False)
 
         header = self.tabela.horizontalHeader()
 
@@ -1209,6 +1886,12 @@ class AbaImportador(QWidget):
         if self.botao_optz is not None:
             layout.addWidget(self.botao_optz)
         layout.addWidget(self.label_arquivo)
+
+        linha_filtro = QHBoxLayout()
+        linha_filtro.addWidget(self.label_filtros, 1)
+        linha_filtro.addWidget(self.botao_limpar_filtros)
+
+        layout.addLayout(linha_filtro)
         layout.addWidget(self.tabela)
 
     def escolher_arquivo(self):
@@ -1254,12 +1937,7 @@ class AbaImportador(QWidget):
                 )
 
             dados["caminho"] = caminho
-            dados["header_bgs"], dados["header_fontes"] = _ler_estilos_cabecalho_excel(
-                caminho,
-                dados["aba"],
-                dados["header_row"],
-                len(dados["df"].columns),
-            )
+            _aplicar_estilos_cabecalho(dados, caminho)
 
             return dados
 
@@ -1290,8 +1968,15 @@ class AbaImportador(QWidget):
         self.df = dados["df"]
         self.bgs = dados["bgs"]
         self.fontes = dados["fontes"]
-        self.cores_cabecalho = dados.get("header_bgs", [])
-        self.fontes_cabecalho = dados.get("header_fontes", [])
+        # Mesma regra de cor das células: #RRGGBB.
+        self.cores_cabecalho = [
+            _normalizar_cor(c, "#FFFFFF")
+            for c in dados.get("header_bgs", [])
+        ]
+        self.fontes_cabecalho = [
+            _normalizar_cor(c, "#000000")
+            for c in dados.get("header_fontes", [])
+        ]
 
         self.df_original = self.df
         self.bgs_original = self.bgs
@@ -1319,7 +2004,9 @@ class AbaImportador(QWidget):
             self.fontes_cabecalho,
         )
 
-        self.tabela.resizeColumnsToContents()
+        self._ajustar_colunas()
+
+        self._resetar_filtros()
 
         self.importado.emit()
 
@@ -1360,7 +2047,133 @@ class AbaImportador(QWidget):
             fontes_visiveis,
         )
 
+        self._ajustar_colunas()
+
+        self._resetar_filtros()
+
+    # --------------------------------------------------------
+    # AJUSTE DE COLUNAS E FILTRO POR COLUNA
+    # --------------------------------------------------------
+
+    def _ajustar_colunas(self):
+        """Ajusta ao conteúdo e reserva espaço para o botão de filtro."""
+
         self.tabela.resizeColumnsToContents()
+
+        cabecalho = self.tabela.horizontalHeader()
+
+        for i in range(cabecalho.count()):
+            cabecalho.resizeSection(
+                i,
+                cabecalho.sectionSize(i) + ESPACO_ICONE_FILTRO
+            )
+
+    def _resetar_filtros(self):
+        """Remove todos os filtros (dados novos ou reprocessados)."""
+
+        self.filtro.limpar_filtros()
+        self._atualizar_resumo_filtro()
+
+    def _abrir_filtro_coluna(self, coluna):
+        """Abre a lista de valores da coluna, como no Excel."""
+
+        if (
+            self.df is None
+            or coluna < 0
+            or coluna >= self.modelo.columnCount()
+        ):
+            return
+
+        disponiveis = self.filtro.valores_disponiveis(coluna)
+        valores = sorted(disponiveis, key=_chave_ordenacao)
+
+        popup = PopupFiltroColuna(
+            self,
+            valores,
+            self.filtro.selecao(coluna),
+        )
+
+        popup.aplicado.connect(
+            lambda selecionados, c=coluna:
+                self._aplicar_selecao_coluna(c, selecionados)
+        )
+
+        popup.adjustSize()
+
+        cabecalho = self.tabela.horizontalHeader()
+
+        ponto = cabecalho.mapToGlobal(
+            QPoint(
+                cabecalho.sectionViewportPosition(coluna),
+                cabecalho.height(),
+            )
+        )
+
+        tela = (
+            QApplication.screenAt(ponto)
+            or QApplication.primaryScreen()
+        )
+        area = tela.availableGeometry()
+
+        x = max(area.left(), min(ponto.x(), area.right() - popup.width()))
+        y = ponto.y()
+
+        if y + popup.height() > area.bottom():
+            y = max(
+                area.top(),
+                ponto.y() - cabecalho.height() - popup.height()
+            )
+
+        popup.move(x, y)
+
+        # Guarda a referência enquanto o popup estiver aberto.
+        self._popup_filtro = popup
+
+        popup.show()
+        popup.campo_busca.setFocus()
+
+    def _aplicar_selecao_coluna(self, coluna, selecionados):
+
+        if selecionados is not None:
+            # Se todos os valores disponíveis estão marcados, não há filtro.
+            disponiveis = set(self.filtro.valores_disponiveis(coluna))
+
+            if disponiveis <= selecionados:
+                selecionados = None
+
+        self.filtro.definir_selecao(coluna, selecionados)
+
+        self._atualizar_resumo_filtro()
+
+    def _limpar_filtros(self):
+
+        self.filtro.limpar_filtros()
+
+        self._atualizar_resumo_filtro()
+
+    def _atualizar_resumo_filtro(self):
+
+        ativas = self.filtro.colunas_filtradas()
+
+        self.botao_limpar_filtros.setEnabled(bool(ativas))
+
+        # Redesenha os botões de filtro do cabeçalho.
+        self.tabela.horizontalHeader().viewport().update()
+
+        if not ativas or self.df is None:
+            self.label_filtros.setText("")
+            return
+
+        nomes = ", ".join(
+            str(self.df.columns[c])
+            for c in ativas
+            if c < len(self.df.columns)
+        )
+
+        self.label_filtros.setText(
+            f"{self.filtro.rowCount()} de {self.modelo.rowCount()} linhas"
+            f"  |  Filtrado por: {nomes}"
+        )
 
     def _rodar(self, fn, on_ok, on_err):
 
@@ -1396,108 +2209,6 @@ class AbaImportador(QWidget):
 
 
 # ============================================================
-# DIÁLOGO DE PROGRESSO TRANSLÚCIDO (BARRA EM LINHA)
-# ============================================================
-
-class DialogoProgressoLinha(QDialog):
-    """Diálogo translúcido, sem moldura, com barra de progresso em linha fina."""
-
-    def __init__(self, parent, titulo="", texto=""):
-        super().__init__(parent)
-
-        self.setWindowTitle(titulo)
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setWindowModality(Qt.WindowModal)
-        self.setMinimumWidth(440)
-
-        self.cartao = QFrame(self)
-        self.cartao.setObjectName("cartaoProgresso")
-
-        self.label_titulo = QLabel(titulo)
-        self.label_titulo.setObjectName("tituloProgresso")
-
-        self.label_texto = QLabel(texto)
-        self.label_texto.setObjectName("textoProgresso")
-        self.label_texto.setWordWrap(True)
-
-        self.barra = QProgressBar()
-        self.barra.setRange(0, 100)
-        self.barra.setValue(0)
-        self.barra.setTextVisible(False)
-        self.barra.setFixedHeight(3)
-
-        interno = QVBoxLayout(self.cartao)
-        interno.setContentsMargins(24, 20, 24, 22)
-        interno.setSpacing(12)
-        interno.addWidget(self.label_titulo)
-        interno.addWidget(self.label_texto)
-        interno.addSpacing(4)
-        interno.addWidget(self.barra)
-
-        externo = QVBoxLayout(self)
-        externo.setContentsMargins(0, 0, 0, 0)
-        externo.addWidget(self.cartao)
-
-        self.setStyleSheet("""
-            QDialog {
-                background: transparent;
-            }
-            QFrame#cartaoProgresso {
-                background-color: rgba(255, 255, 255, 170);
-                border: 1px solid rgba(255, 255, 255, 220);
-                border-radius: 14px;
-            }
-            QLabel {
-                background: transparent;
-                color: #1F2430;
-            }
-            QLabel#tituloProgresso {
-                font-size: 15px;
-                font-weight: 600;
-            }
-            QLabel#textoProgresso {
-                font-size: 12px;
-                color: rgba(31, 36, 48, 200);
-            }
-            QProgressBar {
-                background-color: rgba(0, 0, 0, 35);
-                border: none;
-                border-radius: 1px;
-                min-height: 3px;
-                max-height: 3px;
-            }
-            QProgressBar::chunk {
-                background-color: #4DA3FF;
-                border-radius: 1px;
-            }
-        """)
-
-    # API compatível com QProgressDialog
-    def setValue(self, valor):
-        self.barra.setValue(int(valor))
-
-    def setLabelText(self, texto):
-        self.label_texto.setText(texto)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        pai = self.parentWidget()
-        if pai is not None:
-            centro = pai.frameGeometry().center()
-            geo = self.frameGeometry()
-            geo.moveCenter(centro)
-            self.move(geo.topLeft())
-
-    def keyPressEvent(self, event):
-        # Impede fechar com ESC durante a importação.
-        if event.key() == Qt.Key_Escape:
-            event.ignore()
-            return
-        super().keyPressEvent(event)
-
-
-# ============================================================
 # JANELA PRINCIPAL
 # ============================================================
 
@@ -1508,7 +2219,7 @@ class JanelaPrincipal(QWidget):
         super().__init__()
 
         self.setWindowTitle(
-            "Importador de Excel - TimeTable e Cenário"
+            "Alteração Cenário Rodoviário"
         )
         self.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
 
@@ -1797,29 +2508,11 @@ class JanelaPrincipal(QWidget):
         cols_tt = tt.cols
         cols_cen = cen.cols
 
-        dlg = QProgressDialog(
+        dlg = DialogoProgressoLinha(
+            self,
+            "Processando cenário",
             "Iniciando…",
-            "",
-            0,
-            100,
-            self
         )
-
-        dlg.setCancelButton(None)
-
-        dlg.setWindowTitle(
-            "Processando cenário"
-        )
-
-        dlg.setWindowModality(
-            Qt.WindowModal
-        )
-
-        dlg.setMinimumDuration(0)
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)
-        dlg.setValue(0)
-
         dlg.show()
 
         def tarefa(progresso):
@@ -2025,14 +2718,10 @@ class JanelaPrincipal(QWidget):
 # ============================================================
 
 if __name__ == "__main__":
-
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
     aplicar_estilo(app)
-
     janela = JanelaPrincipal()
     aplicar_fundo_blur(janela)
-
     janela.show()
-
     sys.exit(app.exec())

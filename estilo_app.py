@@ -3,7 +3,13 @@
 """Personalização visual da aplicação PySide6.
 
 Integração no main.py:
-    from estilo_app import aplicar_estilo, aplicar_fundo_blur
+    from estilo_app import (
+        aplicar_estilo,
+        aplicar_fundo_blur,
+        DialogoProgressoLinha,
+        QMessageBox,
+        QInputDialog,
+    )
 
     app = QApplication(sys.argv)
     aplicar_estilo(app)
@@ -18,6 +24,11 @@ a tela seguindo uma curva de Lissajous.
 
 As tabelas mantêm o delegate padrão do Qt para preservar as cores de fundo e
 fonte fornecidas pelo PlanilhaModel a partir do Excel.
+
+Pop-ups: QMessageBox e QInputDialog exportados por este módulo têm as mesmas
+chamadas estáticas das classes do Qt (critical, warning, information, getText,
+getItem), mas aparecem em branco translúcido. DialogoProgressoLinha substitui
+o QProgressDialog, com barra de progresso em linha fina.
 """
 
 import math
@@ -26,11 +37,21 @@ from PySide6.QtCore import QEvent, QPointF, Qt, QTimer
 from PySide6.QtGui import QFont, QPalette, QColor, QPainter, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QFrame,
     QGraphicsDropShadowEffect,
+    QLabel,
+    QLineEdit,
+    QProgressBar,
     QPushButton,
     QTableView,
     QTabWidget,
+    QVBoxLayout,
     QWidget,
+)
+from PySide6.QtWidgets import (
+    QInputDialog as _QInputDialog,
+    QMessageBox as _QMessageBox,
 )
 
 
@@ -63,6 +84,10 @@ FONTE_TAMANHO = 10
 
 # Transparência branca da aba selecionada (0 = invisível; 255 = opaca).
 OPACIDADE_ABA_SELECIONADA = 145
+
+# Transparência branca dos pop-ups (0 = invisível; 255 = opaca).
+OPACIDADE_POPUP = 200            # mensagens e entradas de texto
+OPACIDADE_POPUP_PROGRESSO = 170  # diálogo de progresso
 
 # Intensidade das manchas de cor do fundo (0 a 255).
 INTENSIDADE_BLUR = 115
@@ -244,6 +269,244 @@ def aplicar_fundo_blur(janela: QWidget) -> FundoBlur:
 
 
 # ============================================================
+# POP-UPS BRANCOS TRANSLÚCIDOS
+# ============================================================
+
+ESTILO_POPUP_BRANCO = f"""
+QDialog, QMessageBox, QInputDialog {{
+    background-color: rgba(255, 255, 255, {OPACIDADE_POPUP});
+    border: 1px solid rgba(255, 255, 255, 230);
+    border-radius: 14px;
+}}
+
+QLabel {{
+    background-color: transparent;
+    color: {CORES['texto']};
+    font-size: 13px;
+}}
+
+QLabel#qt_msgbox_label {{
+    font-size: 14px;
+    font-weight: 600;
+}}
+
+QLineEdit, QComboBox {{
+    background-color: rgba(255, 255, 255, 235);
+    color: {CORES['texto']};
+    border: 1px solid {CORES['borda']};
+    border-radius: 6px;
+    padding: 6px 9px;
+}}
+
+QLineEdit:focus, QComboBox:focus {{
+    border: 1px solid {CORES['verde_agua']};
+}}
+
+QComboBox QAbstractItemView {{
+    background-color: {CORES['superficie']};
+    color: {CORES['texto']};
+    selection-background-color: {CORES['selecao']};
+    selection-color: {CORES['selecao_texto']};
+}}
+
+QPushButton {{
+    background-color: rgba(255, 255, 255, 235);
+    color: {CORES['primaria']};
+    border: 1px solid rgba(118, 177, 178, 150);
+    border-radius: 7px;
+    padding: 7px 18px;
+    min-width: 72px;
+    font-weight: 600;
+}}
+
+QPushButton:hover {{
+    background-color: rgba(118, 177, 178, 95);
+    border: 1px solid rgba(118, 177, 178, 200);
+}}
+
+QPushButton:pressed {{
+    background-color: rgba(118, 177, 178, 165);
+}}
+
+QPushButton:default {{
+    border: 1px solid {CORES['verde_agua']};
+}}
+"""
+
+ESTILO_PROGRESSO_BRANCO = f"""
+QDialog {{
+    background: transparent;
+}}
+
+QFrame#cartaoProgresso {{
+    background-color: rgba(255, 255, 255, {OPACIDADE_POPUP_PROGRESSO});
+    border: 1px solid rgba(255, 255, 255, 220);
+    border-radius: 14px;
+}}
+
+QLabel {{
+    background: transparent;
+    color: {CORES['texto']};
+}}
+
+QLabel#tituloProgresso {{
+    font-size: 15px;
+    font-weight: 600;
+    color: {CORES['primaria']};
+}}
+
+QLabel#textoProgresso {{
+    font-size: 12px;
+    color: {CORES['texto_secundario']};
+}}
+
+QProgressBar {{
+    background-color: rgba(0, 0, 0, 35);
+    border: none;
+    border-radius: 1px;
+    min-height: 3px;
+    max-height: 3px;
+}}
+
+QProgressBar::chunk {{
+    background-color: {CORES['verde_agua']};
+    border-radius: 1px;
+}}
+"""
+
+
+def preparar_popup(dlg: QWidget) -> None:
+    """Deixa um pop-up sem moldura, branco e translúcido."""
+    dlg.setWindowFlags(dlg.windowFlags() | Qt.FramelessWindowHint)
+    dlg.setAttribute(Qt.WA_TranslucentBackground, True)
+    dlg.setStyleSheet(ESTILO_POPUP_BRANCO)
+
+
+class QMessageBox(_QMessageBox):
+    """Mesmas chamadas estáticas do QMessageBox, com visual branco translúcido."""
+
+    @staticmethod
+    def _mostrar(parent, icone, titulo, texto):
+        caixa = _QMessageBox(parent)
+        caixa.setIcon(icone)
+        caixa.setText(titulo)
+        caixa.setInformativeText(texto)
+        caixa.setStandardButtons(_QMessageBox.Ok)
+        preparar_popup(caixa)
+        return caixa.exec()
+
+    @staticmethod
+    def critical(parent, titulo, texto, *args, **kwargs):
+        return QMessageBox._mostrar(parent, _QMessageBox.Critical, titulo, texto)
+
+    @staticmethod
+    def warning(parent, titulo, texto, *args, **kwargs):
+        return QMessageBox._mostrar(parent, _QMessageBox.Warning, titulo, texto)
+
+    @staticmethod
+    def information(parent, titulo, texto, *args, **kwargs):
+        return QMessageBox._mostrar(parent, _QMessageBox.Information, titulo, texto)
+
+
+class QInputDialog(_QInputDialog):
+    """getText e getItem com visual branco translúcido."""
+
+    @staticmethod
+    def getText(parent, titulo, rotulo, echo=QLineEdit.Normal, *args, **kwargs):
+        dlg = _QInputDialog(parent)
+        dlg.setInputMode(_QInputDialog.TextInput)
+        dlg.setWindowTitle(titulo)
+        dlg.setLabelText(rotulo)
+        dlg.setTextEchoMode(echo)
+        preparar_popup(dlg)
+        aceito = dlg.exec() == QDialog.Accepted
+        return dlg.textValue(), aceito
+
+    @staticmethod
+    def getItem(parent, titulo, rotulo, itens, atual=0, editavel=True, *args, **kwargs):
+        dlg = _QInputDialog(parent)
+        dlg.setInputMode(_QInputDialog.TextInput)
+        dlg.setWindowTitle(titulo)
+        dlg.setLabelText(rotulo)
+        dlg.setComboBoxItems(list(itens))
+        dlg.setComboBoxEditable(editavel)
+        if 0 <= atual < len(itens):
+            dlg.setTextValue(itens[atual])
+        preparar_popup(dlg)
+        aceito = dlg.exec() == QDialog.Accepted
+        return dlg.textValue(), aceito
+
+
+class DialogoProgressoLinha(QDialog):
+    """Diálogo branco translúcido, sem moldura, com barra de progresso em linha fina.
+
+    Substitui o QProgressDialog: mantém setValue, setLabelText e close.
+    """
+
+    def __init__(self, parent, titulo="", texto=""):
+        super().__init__(parent)
+
+        self.setWindowTitle(titulo)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setWindowModality(Qt.WindowModal)
+        self.setMinimumWidth(440)
+
+        self.cartao = QFrame(self)
+        self.cartao.setObjectName("cartaoProgresso")
+
+        self.label_titulo = QLabel(titulo)
+        self.label_titulo.setObjectName("tituloProgresso")
+
+        self.label_texto = QLabel(texto)
+        self.label_texto.setObjectName("textoProgresso")
+        self.label_texto.setWordWrap(True)
+
+        self.barra = QProgressBar()
+        self.barra.setRange(0, 100)
+        self.barra.setValue(0)
+        self.barra.setTextVisible(False)
+        self.barra.setFixedHeight(3)
+
+        interno = QVBoxLayout(self.cartao)
+        interno.setContentsMargins(24, 20, 24, 22)
+        interno.setSpacing(12)
+        interno.addWidget(self.label_titulo)
+        interno.addWidget(self.label_texto)
+        interno.addSpacing(4)
+        interno.addWidget(self.barra)
+
+        externo = QVBoxLayout(self)
+        externo.setContentsMargins(0, 0, 0, 0)
+        externo.addWidget(self.cartao)
+
+        self.setStyleSheet(ESTILO_PROGRESSO_BRANCO)
+
+    # API compatível com QProgressDialog
+    def setValue(self, valor):
+        self.barra.setValue(int(valor))
+
+    def setLabelText(self, texto):
+        self.label_texto.setText(texto)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        pai = self.parentWidget()
+        if pai is not None:
+            centro = pai.frameGeometry().center()
+            geo = self.frameGeometry()
+            geo.moveCenter(centro)
+            self.move(geo.topLeft())
+
+    def keyPressEvent(self, event):
+        # Impede fechar com ESC durante o processamento.
+        if event.key() == Qt.Key_Escape:
+            event.ignore()
+            return
+        super().keyPressEvent(event)
+
+
+# ============================================================
 # STYLE SHEET (QSS)
 # ============================================================
 
@@ -370,6 +633,25 @@ QTableView::item:selected {{
     color: {CORES['selecao_texto']};
 }}
 
+/* Cabeçalho vertical: faixa dos números das linhas em branco. */
+QHeaderView::section:vertical {{
+    background-color: #FFFFFF;
+    color: #0E3862;
+    border: none;
+    border-right: 1px solid #D9E1E8;
+    border-bottom: 1px solid #D9E1E8;
+    padding: 4px 6px;
+    font-weight: 500;
+}}
+
+/* Canto superior esquerdo da tabela, acima dos números das linhas. */
+QTableCornerButton::section {{
+    background-color: #FFFFFF;
+    border: none;
+    border-right: 1px solid #D9E1E8;
+    border-bottom: 1px solid #D9E1E8;
+}}
+
 /*
 Não impor cores personalizadas aos cabeçalhos ou ao botão de canto da tabela.
 Eles usam o estilo padrão do Qt/Fusion, sem o azul imposto pelo tema.
@@ -455,8 +737,12 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
     border: none;
 }}
 
-/* Caixas de diálogo e progresso */
-QMessageBox, QProgressDialog, QInputDialog, QFileDialog {{
+/*
+Pop-ups de mensagem, entrada e progresso são estilizados em branco translúcido
+por preparar_popup() e DialogoProgressoLinha. O seletor de arquivos é nativo
+do sistema e mantém o fundo sólido.
+*/
+QFileDialog {{
     background-color: {CORES['fundo']};
 }}
 
