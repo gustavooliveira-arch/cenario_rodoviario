@@ -7,7 +7,7 @@ import io
 import zipfile
 import requests
 from collections import Counter
-
+from flask import Flask
 from estilo_app import (
     aplicar_estilo,
     aplicar_fundo_blur,
@@ -2718,6 +2718,7 @@ class JanelaPrincipal(QWidget):
 # ============================================================
 
 if __name__ == "__main__":
+    app = Flask(__name__)
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(CAMINHO_ICONE)))
     aplicar_estilo(app)
