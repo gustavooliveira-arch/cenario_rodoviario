@@ -82,7 +82,7 @@ from regras_cenario import _processar as processar_em_memoria
 
 
 PASTA_APP = Path(__file__).resolve().parent
-CAMINHO_ICONE = PASTA_APP / "assets" / "logo.ico"
+CAMINHO_ICONE = PASTA_APP / "assets" / "carro_icone.ico"
 
 
 # ============================================================
