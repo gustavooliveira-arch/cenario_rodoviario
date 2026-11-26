@@ -1778,6 +1778,7 @@ class AbaImportador(QWidget):
     """Importa Excel: o cabeçalho é localizado automaticamente."""
 
     importado = Signal()
+    removido = Signal()
     importar_optz_solicitado = Signal()
 
     def __init__(self, texto_botao: str, tipo: str):
@@ -1804,12 +1805,14 @@ class AbaImportador(QWidget):
 
         self.cols = None
 
+        self.texto_botao_importar = texto_botao
+
         self.botao_importar = QPushButton(
             texto_botao
         )
 
         self.botao_importar.clicked.connect(
-            self.escolher_arquivo
+            self._acao_botao_arquivo
         )
 
         self.botao_optz = None
@@ -1908,29 +1911,82 @@ class AbaImportador(QWidget):
 
         self._importar(caminho)
 
-    def _importar(self, caminho: str):
+    def _acao_botao_arquivo(self):
+        """Importa quando não há arquivo; remove quando já há."""
+
+        if self.df_original is None:
+            self.escolher_arquivo()
+        else:
+            self.remover_arquivo()
+
+    def remover_arquivo(self):
+        """Descarta o arquivo importado e volta ao estado inicial da aba."""
+
+        self.caminho_arquivo = None
+        self.planilha_encontrada = None
+        self.header_row = 2
+
+        self.df = None
+        self.bgs = None
+        self.fontes = None
+        self.cores_cabecalho = []
+        self.fontes_cabecalho = []
+
+        self.df_original = None
+        self.bgs_original = None
+        self.fontes_original = None
+
+        self.cols = None
+
+        self.modelo.definir(None)
+
+        self._resetar_filtros()
 
         self.label_arquivo.setText(
-            f"Lendo {Path(caminho).name}…"
+            "Nenhum arquivo selecionado"
+        )
+
+        self.botao_importar.setText(
+            self.texto_botao_importar
+        )
+
+        # Sem arquivo, a importação do OPT+Z volta a ficar disponível.
+        if self.botao_optz is not None:
+            self.botao_optz.setVisible(True)
+
+        self.removido.emit()
+
+    def _importar(self, caminho: str):
+
+        titulo = (
+            "Importando TimeTable"
+            if self.tipo == "tt"
+            else "Importando cenário"
+        )
+
+        dlg = DialogoProgressoLinha(
+            self,
+            titulo,
+            "Iniciando importação…",
+        )
+
+        # DialogoProgressoLinha já possui animação própria.
+        # Não usar setRange(): esse método não existe nessa classe.
+        dlg.show()
+
+        self.label_arquivo.setText(
+            f"Importando {Path(caminho).name}…"
         )
 
         def tarefa():
 
-            # O arquivo é lido diretamente.
             if self.tipo == "tt":
-
-                dados = carregar_timetable(
-                    caminho
-                )
+                dados = carregar_timetable(caminho)
 
             elif self.tipo == "cen":
-
-                dados = carregar_cenario(
-                    caminho
-                )
+                dados = carregar_cenario(caminho)
 
             else:
-
                 raise ValueError(
                     f"Tipo de planilha inválido: {self.tipo}"
                 )
@@ -1940,10 +1996,20 @@ class AbaImportador(QWidget):
 
             return dados
 
+        def sucesso(dados):
+
+            dlg.close()
+            self._aplicar_carga(dados)
+
+        def erro(msg):
+
+            dlg.close()
+            self._falha_carga(msg)
+
         self._rodar(
             tarefa,
-            self._aplicar_carga,
-            self._falha_carga
+            sucesso,
+            erro
         )
 
     def _falha_carga(self, msg: str):
@@ -2006,6 +2072,12 @@ class AbaImportador(QWidget):
         self._ajustar_colunas()
 
         self._resetar_filtros()
+
+        self.botao_importar.setText("Remover Arquivo")
+
+        # Com arquivo carregado, a importação do OPT+Z fica oculta.
+        if self.botao_optz is not None:
+            self.botao_optz.setVisible(False)
 
         self.importado.emit()
 

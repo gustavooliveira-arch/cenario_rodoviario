@@ -27,8 +27,9 @@ fonte fornecidas pelo PlanilhaModel a partir do Excel.
 
 Pop-ups: QMessageBox e QInputDialog exportados por este módulo têm as mesmas
 chamadas estáticas das classes do Qt (critical, warning, information, getText,
-getItem), mas aparecem em branco translúcido. DialogoProgressoLinha substitui
-o QProgressDialog, com barra de progresso em linha fina.
+getItem). As mensagens (QMessageBox) aparecem em branco opaco; as entradas
+(QInputDialog) e o DialogoProgressoLinha, que substitui o QProgressDialog com
+barra de progresso em linha fina, aparecem em branco translúcido.
 """
 
 import math
@@ -37,13 +38,16 @@ from PySide6.QtCore import QEvent, QPointF, Qt, QTimer
 from PySide6.QtGui import QFont, QPalette, QColor, QPainter, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QStyle,
     QTableView,
     QTabWidget,
     QVBoxLayout,
@@ -86,7 +90,8 @@ FONTE_TAMANHO = 10
 OPACIDADE_ABA_SELECIONADA = 145
 
 # Transparência branca dos pop-ups (0 = invisível; 255 = opaca).
-OPACIDADE_POPUP = 200            # mensagens e entradas de texto
+OPACIDADE_POPUP = 255            # mensagens: opacas (sem translucidez)
+OPACIDADE_INPUT_DIALOG = 200     # entradas: translúcidas
 OPACIDADE_POPUP_PROGRESSO = 170  # diálogo de progresso
 
 # Intensidade das manchas de cor do fundo (0 a 255).
@@ -248,6 +253,8 @@ def aplicar_fundo_blur(janela: QWidget) -> FundoBlur:
     """Adiciona o fundo colorido desfocado à janela principal.
 
     Chame depois de criar a JanelaPrincipal e antes de janela.show().
+    Use somente na janela principal: a camada pinta uma base opaca, então
+    não a aplique a pop-ups.
     """
     if not isinstance(janela, QWidget):
         raise TypeError("aplicar_fundo_blur espera um QWidget como janela.")
@@ -374,38 +381,301 @@ QProgressBar::chunk {{
 }}
 """
 
+# Mensagens (critical, warning, information): mesmo esquema de cartão do
+# diálogo de progresso. A janela fica transparente e o cartão desenha o
+# branco translúcido.
+def _estilo_mensagem(opacidade: int) -> str:
+    """QSS do cartão de mensagem/entrada com a opacidade indicada."""
+    return f"""
+QDialog {{
+    background: transparent;
+}}
 
-def preparar_popup(dlg: QWidget) -> None:
-    """Deixa um pop-up sem moldura, branco e translúcido."""
-    dlg.setWindowFlags(dlg.windowFlags() | Qt.FramelessWindowHint)
-    dlg.setAttribute(Qt.WA_TranslucentBackground, True)
-    dlg.setStyleSheet(ESTILO_POPUP_BRANCO)
+QFrame#cartaoMensagem {{
+    background-color: rgba(255, 255, 255, {opacidade});
+    border: 1px solid rgba(255, 255, 255, 230);
+    border-radius: 14px;
+}}
+
+QLabel {{
+    background: transparent;
+    color: {CORES['texto']};
+}}
+
+QLabel#tituloMensagem {{
+    font-size: 15px;
+    font-weight: 600;
+    color: {CORES['primaria']};
+}}
+
+QLabel#textoMensagem {{
+    font-size: 13px;
+    color: {CORES['texto']};
+}}
+
+QPushButton {{
+    background-color: rgba(255, 255, 255, 235);
+    color: {CORES['primaria']};
+    border: 1px solid rgba(118, 177, 178, 150);
+    border-radius: 7px;
+    padding: 7px 18px;
+    min-width: 72px;
+    font-weight: 600;
+}}
+
+QPushButton:hover {{
+    background-color: rgba(118, 177, 178, 95);
+    border: 1px solid rgba(118, 177, 178, 200);
+}}
+
+QPushButton:pressed {{
+    background-color: rgba(118, 177, 178, 165);
+}}
+
+QPushButton:default {{
+    border: 1px solid {CORES['verde_agua']};
+}}
+"""
+
+
+ESTILO_MENSAGEM_BRANCO = _estilo_mensagem(OPACIDADE_POPUP)
+
+# Entradas (getText, getItem): mesmo cartão das mensagens + campos de entrada.
+ESTILO_ENTRADA_BRANCO = _estilo_mensagem(OPACIDADE_INPUT_DIALOG) + f"""
+QLineEdit, QComboBox {{
+    background-color: rgba(255, 255, 255, 235);
+    color: {CORES['texto']};
+    border: 1px solid {CORES['borda']};
+    border-radius: 6px;
+    padding: 6px 9px;
+}}
+
+QLineEdit:focus, QComboBox:focus {{
+    border: 1px solid {CORES['verde_agua']};
+}}
+
+QComboBox::drop-down {{
+    border: none;
+    width: 25px;
+}}
+
+QComboBox QAbstractItemView {{
+    background-color: {CORES['superficie']};
+    color: {CORES['texto']};
+    border: 1px solid {CORES['borda']};
+    selection-background-color: {CORES['selecao']};
+    selection-color: {CORES['selecao_texto']};
+}}
+"""
+
+
+class DialogoMensagem(QDialog):
+    """Mensagem branca opaca, sem moldura, com ícone, título e texto.
+
+    Usa o mesmo cartão do DialogoProgressoLinha: a janela é transparente e o
+    QFrame interno desenha o branco translúcido.
+    """
+
+    def __init__(self, parent, icone, titulo, texto):
+        super().__init__(parent)
+
+        self.setWindowTitle(titulo)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(False)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(620)
+
+        paleta = self.palette()
+        paleta.setColor(QPalette.Window, QColor(255, 255, 255, 0))
+        self.setPalette(paleta)
+
+        self.cartao = QFrame(self)
+        self.cartao.setObjectName("cartaoMensagem")
+        self.cartao.setAttribute(Qt.WA_StyledBackground, True)
+        self.cartao.setAutoFillBackground(False)
+
+        self.label_icone = QLabel()
+        self.label_icone.setFixedSize(40, 40)
+        self.label_icone.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        self.label_icone.setPixmap(
+            self.style().standardIcon(icone).pixmap(36, 36)
+        )
+
+        self.label_titulo = QLabel(titulo)
+        self.label_titulo.setObjectName("tituloMensagem")
+        self.label_titulo.setWordWrap(True)
+        self.label_titulo.setTextFormat(Qt.PlainText)
+
+        self.label_texto = QLabel(texto)
+        self.label_texto.setObjectName("textoMensagem")
+        self.label_texto.setWordWrap(True)
+        # Texto puro (mensagens de erro podem conter "<" e ">") e selecionável.
+        self.label_texto.setTextFormat(Qt.PlainText)
+        self.label_texto.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        coluna_texto = QVBoxLayout()
+        coluna_texto.setSpacing(8)
+        coluna_texto.addWidget(self.label_titulo)
+        if texto:
+            coluna_texto.addWidget(self.label_texto)
+        coluna_texto.addStretch(1)
+
+        linha_conteudo = QHBoxLayout()
+        linha_conteudo.setSpacing(14)
+        linha_conteudo.addWidget(self.label_icone, 0, Qt.AlignTop)
+        linha_conteudo.addLayout(coluna_texto, 1)
+
+        self.botao_ok = QPushButton("OK")
+        self.botao_ok.setDefault(True)
+        self.botao_ok.clicked.connect(self.accept)
+
+        linha_botao = QHBoxLayout()
+        linha_botao.addStretch(1)
+        linha_botao.addWidget(self.botao_ok)
+
+        interno = QVBoxLayout(self.cartao)
+        interno.setContentsMargins(24, 22, 24, 18)
+        interno.setSpacing(16)
+        interno.addLayout(linha_conteudo)
+        interno.addLayout(linha_botao)
+
+        externo = QVBoxLayout(self)
+        externo.setContentsMargins(0, 0, 0, 0)
+        externo.addWidget(self.cartao)
+
+        self.setStyleSheet(ESTILO_MENSAGEM_BRANCO)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        pai = self.parentWidget()
+        if pai is not None:
+            centro = pai.window().frameGeometry().center()
+            geo = self.frameGeometry()
+            geo.moveCenter(centro)
+            self.move(geo.topLeft())
+        self.botao_ok.setFocus()
 
 
 class QMessageBox(_QMessageBox):
-    """Mesmas chamadas estáticas do QMessageBox, com visual branco translúcido."""
+    """Mesmas chamadas estáticas do QMessageBox, com cartão branco opaco."""
 
     @staticmethod
     def _mostrar(parent, icone, titulo, texto):
-        caixa = _QMessageBox(parent)
-        caixa.setIcon(icone)
-        caixa.setText(titulo)
-        caixa.setInformativeText(texto)
-        caixa.setStandardButtons(_QMessageBox.Ok)
-        preparar_popup(caixa)
-        return caixa.exec()
+        DialogoMensagem(parent, icone, titulo, texto).exec()
+        return _QMessageBox.Ok
 
     @staticmethod
     def critical(parent, titulo, texto, *args, **kwargs):
-        return QMessageBox._mostrar(parent, _QMessageBox.Critical, titulo, texto)
+        return QMessageBox._mostrar(
+            parent, QStyle.SP_MessageBoxCritical, titulo, texto
+        )
 
     @staticmethod
     def warning(parent, titulo, texto, *args, **kwargs):
-        return QMessageBox._mostrar(parent, _QMessageBox.Warning, titulo, texto)
+        return QMessageBox._mostrar(
+            parent, QStyle.SP_MessageBoxWarning, titulo, texto
+        )
 
     @staticmethod
     def information(parent, titulo, texto, *args, **kwargs):
-        return QMessageBox._mostrar(parent, _QMessageBox.Information, titulo, texto)
+        return QMessageBox._mostrar(
+            parent, QStyle.SP_MessageBoxInformation, titulo, texto
+        )
+
+
+class DialogoEntrada(QDialog):
+    """Entrada de texto ou escolha de item, com o mesmo cartão das mensagens."""
+
+    def __init__(self, parent, titulo, rotulo, itens=None, atual=0,
+                 editavel=True, echo=QLineEdit.Normal):
+        super().__init__(parent)
+
+        self.setWindowTitle(titulo)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(False)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(620)
+
+        paleta = self.palette()
+        paleta.setColor(QPalette.Window, QColor(255, 255, 255, 0))
+        self.setPalette(paleta)
+
+        self.cartao = QFrame(self)
+        self.cartao.setObjectName("cartaoMensagem")
+        self.cartao.setAttribute(Qt.WA_StyledBackground, True)
+        self.cartao.setAutoFillBackground(False)
+
+        self.label_titulo = QLabel(titulo)
+        self.label_titulo.setObjectName("tituloMensagem")
+        self.label_titulo.setWordWrap(True)
+        self.label_titulo.setTextFormat(Qt.PlainText)
+
+        self.label_rotulo = QLabel(rotulo)
+        self.label_rotulo.setObjectName("textoMensagem")
+        self.label_rotulo.setWordWrap(True)
+        self.label_rotulo.setTextFormat(Qt.PlainText)
+
+        if itens is None:
+            self.campo = QLineEdit()
+            self.campo.setEchoMode(echo)
+        else:
+            itens = list(itens)
+            self.campo = QComboBox()
+            self.campo.addItems(itens)
+            self.campo.setEditable(editavel)
+            if 0 <= atual < len(itens):
+                self.campo.setCurrentIndex(atual)
+
+        self.botao_ok = QPushButton("OK")
+        self.botao_ok.setDefault(True)
+        self.botao_ok.clicked.connect(self.accept)
+
+        self.botao_cancelar = QPushButton("Cancelar")
+        self.botao_cancelar.setAutoDefault(False)
+        self.botao_cancelar.clicked.connect(self.reject)
+
+        linha_botoes = QHBoxLayout()
+        linha_botoes.setSpacing(8)
+        linha_botoes.addStretch(1)
+        linha_botoes.addWidget(self.botao_ok)
+        linha_botoes.addWidget(self.botao_cancelar)
+
+        interno = QVBoxLayout(self.cartao)
+        interno.setContentsMargins(24, 22, 24, 18)
+        interno.setSpacing(12)
+        interno.addWidget(self.label_titulo)
+        if rotulo:
+            interno.addWidget(self.label_rotulo)
+        interno.addWidget(self.campo)
+        interno.addSpacing(4)
+        interno.addLayout(linha_botoes)
+
+        externo = QVBoxLayout(self)
+        externo.setContentsMargins(0, 0, 0, 0)
+        externo.addWidget(self.cartao)
+
+        self.setStyleSheet(ESTILO_ENTRADA_BRANCO)
+
+    def valor(self) -> str:
+        if isinstance(self.campo, QComboBox):
+            return self.campo.currentText()
+        return self.campo.text()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        pai = self.parentWidget()
+        if pai is not None:
+            centro = pai.window().frameGeometry().center()
+            geo = self.frameGeometry()
+            geo.moveCenter(centro)
+            self.move(geo.topLeft())
+        self.campo.setFocus()
+        if isinstance(self.campo, QLineEdit):
+            self.campo.selectAll()
 
 
 class QInputDialog(_QInputDialog):
@@ -413,28 +683,17 @@ class QInputDialog(_QInputDialog):
 
     @staticmethod
     def getText(parent, titulo, rotulo, echo=QLineEdit.Normal, *args, **kwargs):
-        dlg = _QInputDialog(parent)
-        dlg.setInputMode(_QInputDialog.TextInput)
-        dlg.setWindowTitle(titulo)
-        dlg.setLabelText(rotulo)
-        dlg.setTextEchoMode(echo)
-        preparar_popup(dlg)
+        dlg = DialogoEntrada(parent, titulo, rotulo, echo=echo)
         aceito = dlg.exec() == QDialog.Accepted
-        return dlg.textValue(), aceito
+        return dlg.valor(), aceito
 
     @staticmethod
     def getItem(parent, titulo, rotulo, itens, atual=0, editavel=True, *args, **kwargs):
-        dlg = _QInputDialog(parent)
-        dlg.setInputMode(_QInputDialog.TextInput)
-        dlg.setWindowTitle(titulo)
-        dlg.setLabelText(rotulo)
-        dlg.setComboBoxItems(list(itens))
-        dlg.setComboBoxEditable(editavel)
-        if 0 <= atual < len(itens):
-            dlg.setTextValue(itens[atual])
-        preparar_popup(dlg)
+        dlg = DialogoEntrada(
+            parent, titulo, rotulo, itens=itens, atual=atual, editavel=editavel
+        )
         aceito = dlg.exec() == QDialog.Accepted
-        return dlg.textValue(), aceito
+        return dlg.valor(), aceito
 
 
 class DialogoProgressoLinha(QDialog):
@@ -449,11 +708,19 @@ class DialogoProgressoLinha(QDialog):
         self.setWindowTitle(titulo)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(False)
         self.setWindowModality(Qt.WindowModal)
         self.setMinimumWidth(440)
 
+        paleta = self.palette()
+        paleta.setColor(QPalette.Window, QColor(255, 255, 255, 0))
+        self.setPalette(paleta)
+
         self.cartao = QFrame(self)
         self.cartao.setObjectName("cartaoProgresso")
+        self.cartao.setAttribute(Qt.WA_StyledBackground, True)
+        self.cartao.setAutoFillBackground(False)
 
         self.label_titulo = QLabel(titulo)
         self.label_titulo.setObjectName("tituloProgresso")
@@ -739,8 +1006,8 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 
 /*
 Pop-ups de mensagem, entrada e progresso são estilizados em branco translúcido
-por preparar_popup() e DialogoProgressoLinha. O seletor de arquivos é nativo
-do sistema e mantém o fundo sólido.
+por DialogoMensagem, DialogoEntrada e DialogoProgressoLinha. O seletor de
+arquivos é nativo do sistema e mantém o fundo sólido.
 */
 QFileDialog {{
     background-color: {CORES['fundo']};
