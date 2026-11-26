@@ -29,8 +29,10 @@ _TEMA_PADRAO = [
     "FFFFFF", "000000", "E7E6E6", "44546A", "4472C4", "ED7D31",
     "A5A5A5", "FFC000", "5B9BD5", "70AD47", "0563C1", "954F72",
 ]
-_NOMES_TEMA = ["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3",
-               "accent4", "accent5", "accent6", "hlink", "folHlink"]
+_NOMES_TEMA = [
+    "lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3",
+    "accent4", "accent5", "accent6", "hlink", "folHlink",
+]
 
 _RE_HORA = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 
@@ -42,10 +44,11 @@ def paleta_tema(wb) -> list[str]:
         return _TEMA_PADRAO
     if isinstance(xml, bytes):
         xml = xml.decode("utf-8", errors="ignore")
+
     saida = []
     for nome in _NOMES_TEMA:
         m = re.search(
-            rf"<a:{nome}>\s*<a:(?:srgbClr val|sysClr[^>]*?lastClr)=\"([0-9A-Fa-f]{{6}})\"",
+            rf'<a:{nome}>\s*<a:(?:srgbClr val|sysClr[^>]*?lastClr)="([0-9A-Fa-f]{{6}})"',
             xml,
         )
         if not m:
@@ -96,7 +99,7 @@ def cor_para_hex(color, tema: list[str] | None = None) -> str | None:
         rgb = getattr(color, "rgb", None)
         if not rgb:
             return None
-        # "00000000" é o valor padrão do openpyxl para "sem cor definida"
+        # "00000000" é o valor padrão do openpyxl para "sem cor definida".
         if str(rgb).upper() == "00000000":
             return None
         return _hex_de_argb(rgb)
@@ -124,7 +127,7 @@ def cor_para_hex(color, tema: list[str] | None = None) -> str | None:
             idx = int(idx)
         except (TypeError, ValueError):
             return None
-        # 64/65 = cores de sistema (primeiro plano / fundo automáticos)
+        # 64/65 = cores de sistema (primeiro plano / fundo automáticos).
         if not 0 <= idx < min(64, len(COLOR_INDEX)):
             return None
         return _hex_de_argb(COLOR_INDEX[idx])
@@ -148,7 +151,7 @@ def cor_fonte(cell, tema: list[str] | None = None) -> str | None:
     if font is None or font.color is None:
         return None
     hex_ = cor_para_hex(font.color, tema)
-    # preto é a cor padrão: não precisa ser gravado
+    # Preto é a cor padrão: não precisa ser gravado.
     if hex_ in (None, "#000000"):
         return None
     return hex_
@@ -190,39 +193,117 @@ def _valor_celula(v, eh_hora: bool) -> object:
     if eh_hora:
         if isinstance(v, (datetime, time, timedelta)):
             return normalizar_hora_exibicao(v)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= float(v) < 1.5:
+        if (
+            isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and 0 <= float(v) < 1.5
+        ):
             total = int(round(float(v) * 24 * 60))
             return f"{(total // 60) % 24:02d}:{total % 60:02d}"
     return v
 
 
-def localizar_cabecalho_ws(ws, nomes: list[str]) -> tuple[int, list[int]]:
-    """Localiza todos os cabeçalhos na mesma linha (a que tiver mais nomes esperados)."""
-    alvos = [norm_cabecalho(n) for n in nomes]
+def localizar_cabecalho_ws(
+    ws,
+    nomes: list[str],
+    grupos_alternativos: dict[int, tuple[str, ...]] | None = None,
+) -> tuple[int, list[int]]:
+    """
+    Localiza os cabeçalhos na mesma linha.
+
+    Na TimeTable, TIPO DE HORÁRIO e TIPO DE ALTERAÇÃO são campos
+    relacionados: quando a planilha apresenta apenas um dos nomes aceitos
+    (incluindo TIPO VIAGEM), a mesma coluna atende às duas posições do
+    mapeamento. Quando apresenta TIPO DE HORÁRIO e TIPO DE ALTERAÇÃO
+    separadamente, cada posição aponta para sua respectiva coluna.
+    """
+    grupos_alternativos = grupos_alternativos or {}
+    eh_timetable = (
+        len(nomes) == len(NOMES_TT)
+        and [norm_cabecalho(n) for n in nomes]
+        == [norm_cabecalho(n) for n in NOMES_TT]
+    )
+
+    candidatos = []
+    for i, nome in enumerate(nomes):
+        alternativas = grupos_alternativos.get(i, ())
+        opcoes = (nome, *alternativas)
+        candidatos.append(
+            tuple(dict.fromkeys(norm_cabecalho(n) for n in opcoes))
+        )
+
+    aliases_tipo = {
+        "horario": norm_cabecalho("TIPO DE HORÁRIO"),
+        "alteracao": norm_cabecalho("TIPO DE ALTERAÇÃO"),
+        "viagem": norm_cabecalho("TIPO VIAGEM"),
+    }
+
     ult_col = ws.max_column or 1
     ult_lin = min(ws.max_row or 1, MAX_LINHAS_CABECALHO)
 
     melhor_linha, melhores, melhor_pont = 0, {}, 0
+
     for r, linha in enumerate(
-            ws.iter_rows(min_row=1, max_row=ult_lin, max_col=ult_col, values_only=True), 1):
-        pos: dict[str, int] = {}
-        for c, v in enumerate(linha, 1):
-            t = norm_cabecalho(v)
-            if t in alvos and t not in pos:
-                pos[t] = c
-        if len(pos) > melhor_pont:
-            melhor_linha, melhores, melhor_pont = r, pos, len(pos)
-        if melhor_pont == len(alvos):
+        ws.iter_rows(
+            min_row=1,
+            max_row=ult_lin,
+            max_col=ult_col,
+            values_only=True,
+        ),
+        1,
+    ):
+        pos: dict[int, int] = {}
+        pos_alias: dict[str, int] = {}
+
+        for c, valor in enumerate(linha, 1):
+            titulo = norm_cabecalho(valor)
+            if not titulo:
+                continue
+
+            if eh_timetable and titulo in aliases_tipo.values():
+                # Guarda a primeira ocorrência de cada nomenclatura.
+                for chave, alias in aliases_tipo.items():
+                    if titulo == alias and chave not in pos_alias:
+                        pos_alias[chave] = c
+                continue
+
+            for i, opcoes in enumerate(candidatos):
+                if eh_timetable and i in (5, 6):
+                    continue
+                if i not in pos and titulo in opcoes:
+                    pos[i] = c
+                    break
+
+        if eh_timetable:
+            # Replica a regra do processamento principal: prioriza
+            # TIPO DE ALTERAÇÃO, depois TIPO DE HORÁRIO e TIPO VIAGEM.
+            col_classificacao = (
+                pos_alias.get("alteracao")
+                or pos_alias.get("horario")
+                or pos_alias.get("viagem")
+            )
+            if col_classificacao:
+                pos[5] = pos_alias.get("horario") or col_classificacao
+                pos[6] = col_classificacao
+
+        pontuacao = len(pos)
+        if pontuacao > melhor_pont:
+            melhor_linha, melhores, melhor_pont = r, pos, pontuacao
+
+        if melhor_pont == len(nomes):
             break
 
-    faltando = [n for n, a in zip(nomes, alvos) if a not in melhores]
+    faltando = [
+        nomes[i] for i in range(len(nomes)) if i not in melhores
+    ]
     if faltando:
         raise ValueError(
-            f"Não encontrei todos os cabeçalhos na mesma linha da aba '{ws.title}'.\n"
-            f"Melhor linha encontrada: {melhor_linha}\n"
+            f"Não encontrei todos os cabeçalhos na mesma linha da aba '{ws.title}'.\\n"
+            f"Melhor linha encontrada: {melhor_linha}\\n"
             f"Faltando: {', '.join(faltando)}"
         )
-    return melhor_linha, [melhores[a] for a in alvos]
+
+    return melhor_linha, [melhores[i] for i in range(len(nomes))]
 
 
 def _nome_aba(wb, nomes_aceitaveis: tuple[str, ...]) -> str:
@@ -241,7 +322,11 @@ def _nome_aba(wb, nomes_aceitaveis: tuple[str, ...]) -> str:
     )
 
 
-def _ultima_linha_util(ws, colunas_1based: list[int], lin_cab: int) -> int:
+def _ultima_linha_util(
+    ws,
+    colunas_1based: list[int],
+    lin_cab: int,
+) -> int:
     ult = ws.max_row or lin_cab
     if ult <= lin_cab:
         return lin_cab
@@ -270,7 +355,19 @@ def carregar_planilha(
         nome_aba = _nome_aba(wb, nomes_aba)
         ws = wb[nome_aba]
 
-        lin_cab, cols_obrig = localizar_cabecalho_ws(ws, nomes_cabecalho)
+        eh_cenario = [
+            norm_cabecalho(n) for n in nomes_cabecalho
+        ] == [
+            norm_cabecalho(n) for n in NOMES_CEN
+        ]
+
+        # O localizador trata os nomes alternativos da TimeTable em conjunto,
+        # permitindo que uma única coluna atenda às posições 5 e 6 quando
+        # a planilha não traz os dois campos separadamente.
+        lin_cab, cols_obrig = localizar_cabecalho_ws(
+            ws,
+            nomes_cabecalho,
+        )
         ult_col = ws.max_column or 1
 
         # Títulos: nomes vazios viram Unnamed_N e duplicados recebem sufixo.
@@ -294,13 +391,10 @@ def carregar_planilha(
                 usados[nome] = 1
             titulos.append(nome)
 
-        eh_cenario = [norm_cabecalho(n) for n in nomes_cabecalho] == [
-            norm_cabecalho(n) for n in NOMES_CEN
-        ]
         if eh_cenario:
             colunas_limite = [c for c in cols_obrig[:3] if c]
         else:
-            # LINHA 1, SERVIÇO 1 e TIPO DE ALTERAÇÃO
+            # LINHA 1, SERVIÇO 1 e a coluna de classificação.
             colunas_limite = [cols_obrig[0], cols_obrig[2], cols_obrig[6]]
 
         ult_lin = _ultima_linha_util(ws, colunas_limite, lin_cab)
@@ -335,11 +429,10 @@ def carregar_planilha(
         else:
             df = pd.DataFrame(columns=titulos)
 
-        mapa_cols = []
-        for nome in nomes_cabecalho:
-            alvo = norm_cabecalho(nome)
-            idx = next((i for i, t in enumerate(titulos) if norm_cabecalho(t) == alvo), -1)
-            mapa_cols.append(idx)
+        # Mapeia pelas posições efetivamente localizadas, inclusive quando
+        # uma coluna alternativa atende às posições 5 e 6 da TimeTable.
+        mapa_cols = [coluna - 1 for coluna in cols_obrig]
+
     finally:
         wb.close()
 
@@ -368,9 +461,6 @@ def _fill_hex(hex_cor: str) -> PatternFill:
     return PatternFill(fill_type="solid", fgColor="FF" + rgb)
 
 
-
-
-
 def salvar_cenario(
     caminho_origem: str | None,
     nome_aba: str,
@@ -389,17 +479,13 @@ def salvar_cenario(
     - Preserva cores, fontes e horários.
     - Otimizado para grandes volumes.
     """
-
     if df is None:
         raise ValueError("Não existe DataFrame para salvar.")
 
     if header_row < 1:
         raise ValueError("Linha de cabeçalho inválida.")
 
-    # ======================================================
-    # GARANTE TIPO DE ALTERAÇÃO COMO PRIMEIRA COLUNA
-    # ======================================================
-
+    # GARANTE TIPO DE ALTERAÇÃO COMO PRIMEIRA COLUNA.
     indice_tipo = next(
         (
             i
@@ -407,18 +493,14 @@ def salvar_cenario(
             if norm_cabecalho(nome)
             == norm_cabecalho("TIPO DE ALTERAÇÃO")
         ),
-        None
+        None,
     )
 
     if indice_tipo is not None and indice_tipo != 0:
-
         ordem = [indice_tipo] + [
-            i for i in range(len(df.columns))
-            if i != indice_tipo
+            i for i in range(len(df.columns)) if i != indice_tipo
         ]
-
         df = df.iloc[:, ordem].copy()
-
         bgs = [
             [
                 linha[i] if i < len(linha) else "#FFFFFF"
@@ -426,7 +508,6 @@ def salvar_cenario(
             ]
             for linha in bgs
         ]
-
         fontes = [
             [
                 linha[i] if i < len(linha) else None
@@ -434,317 +515,167 @@ def salvar_cenario(
             ]
             for linha in fontes
         ]
-
     else:
         df = df.copy()
 
-    # ======================================================
-    # ABERTURA DO WORKBOOK
-    # ======================================================
-
+    # ABERTURA DO WORKBOOK.
     if caminho_origem:
-
         wb = load_workbook(caminho_origem)
-
         if nome_aba in wb.sheetnames:
             ws = wb[nome_aba]
         else:
             ws = wb.create_sheet(nome_aba)
             header_row = 1
-
     else:
-
         wb = Workbook()
         ws = wb.active
         ws.title = nome_aba or "Cenario"
         header_row = 1
 
     try:
-
         n = len(df)
         ncols = len(df.columns)
 
-        # ==================================================
-        # GUARDA A FORMATAÇÃO ORIGINAL DOS CABEÇALHOS
-        # ANTES DE ALTERAR A ORDEM DAS COLUNAS
-        # ==================================================
-
+        # GUARDA A FORMATAÇÃO ORIGINAL DOS CABEÇALHOS.
         estilos_por_nome = {}
         contagem_estilos = {}
         estilos_modelo = {}
 
         for c in range(1, ws.max_column + 1):
-
-            cel_original = ws.cell(
-                header_row,
-                c
-            )
-
-            nome_original = norm_cabecalho(
-                cel_original.value
-            )
+            cel_original = ws.cell(header_row, c)
+            nome_original = norm_cabecalho(cel_original.value)
 
             if nome_original:
-
                 estilo_original = (
                     copy(cel_original._style)
                     if cel_original.has_style
                     else None
                 )
-
                 estilos_por_nome.setdefault(
-                    nome_original,
-                    []
+                    nome_original, []
                 ).append(estilo_original)
 
             if cel_original.has_style:
-
                 estilo_id = cel_original.style_id
-
                 contagem_estilos[estilo_id] = (
                     contagem_estilos.get(estilo_id, 0) + 1
                 )
+                estilos_modelo[estilo_id] = copy(cel_original._style)
 
-                estilos_modelo[estilo_id] = copy(
-                    cel_original._style
-                )
-
-        # ==================================================
-        # IDENTIFICA O ESTILO PADRÃO DOS CABEÇALHOS
-        # ==================================================
-
+        # IDENTIFICA O ESTILO PADRÃO DOS CABEÇALHOS.
         estilo_padrao = None
-
         if contagem_estilos:
-
             id_estilo_padrao = max(
                 contagem_estilos,
-                key=contagem_estilos.get
+                key=contagem_estilos.get,
             )
+            estilo_padrao = estilos_modelo[id_estilo_padrao]
 
-            estilo_padrao = estilos_modelo[
-                id_estilo_padrao
-            ]
-
-        # ==================================================
-        # LIMPA OS DADOS ANTIGOS
-        # ==================================================
-
+        # LIMPA OS DADOS ANTIGOS.
         if ws.max_row > header_row:
-
             ws.delete_rows(
                 header_row + 1,
-                ws.max_row - header_row
+                ws.max_row - header_row,
             )
 
-        # ==================================================
-        # ATUALIZA OS CABEÇALHOS PRESERVANDO A FORMATAÇÃO
-        # ==================================================
-
+        # ATUALIZA OS CABEÇALHOS PRESERVANDO A FORMATAÇÃO.
         ocorrencias = {}
-
-        for c, nome in enumerate(
-            df.columns,
-            start=1
-        ):
-
-            nome = (
-                ""
-                if nome is None
-                else str(nome)
-            )
-
+        for c, nome in enumerate(df.columns, start=1):
+            nome = "" if nome is None else str(nome)
             chave = norm_cabecalho(nome)
+            destino = ws.cell(header_row, c)
 
-            destino = ws.cell(
-                header_row,
-                c
-            )
-
-            lista_estilos = estilos_por_nome.get(
-                chave,
-                []
-            )
-
-            indice_ocorrencia = ocorrencias.get(
-                chave,
-                0
-            )
-
+            lista_estilos = estilos_por_nome.get(chave, [])
+            indice_ocorrencia = ocorrencias.get(chave, 0)
             estilo = None
 
             if indice_ocorrencia < len(lista_estilos):
-
-                estilo = lista_estilos[
-                    indice_ocorrencia
-                ]
-
-                ocorrencias[chave] = (
-                    indice_ocorrencia + 1
-                )
+                estilo = lista_estilos[indice_ocorrencia]
+                ocorrencias[chave] = indice_ocorrencia + 1
 
             # Colunas novas recebem o estilo predominante.
             if estilo is None:
                 estilo = estilo_padrao
 
-            # Copia a formatação completa do cabeçalho original.
             if estilo is not None:
-
                 destino._style = copy(estilo)
 
             # Atualiza somente o texto.
             destino.value = nome
 
         # Limpa cabeçalhos que não pertencem mais ao resultado.
-        for c in range(
-            ncols + 1,
-            ws.max_column + 1
-        ):
+        for c in range(ncols + 1, ws.max_column + 1):
+            ws.cell(header_row, c).value = None
 
-            ws.cell(
-                header_row,
-                c
-            ).value = None
-
-        # ==================================================
-        # IDENTIFICA COLUNAS DE HORÁRIO
-        # ==================================================
-
+        # IDENTIFICA COLUNAS DE HORÁRIO.
         eh_col_hora = [
-            norm_sem_acento(nome) in (
-                "PARTIDA",
-                "CHEGADA"
-            )
+            norm_sem_acento(nome) in ("PARTIDA", "CHEGADA")
             for nome in df.columns
         ]
 
-        # ==================================================
-        # CACHES DE FORMATAÇÃO
-        # ==================================================
-
+        # CACHES DE FORMATAÇÃO.
         cache_fill = {}
         cache_fonte = {}
-
         alinhamento = Alignment(
             horizontal="center",
-            vertical="center"
+            vertical="center",
         )
-
         fonte_preta = "FF000000"
 
-        # ==================================================
-        # LARGURA DA COLUNA TIPO DE ALTERAÇÃO
-        # ==================================================
-
+        # LARGURA DA COLUNA TIPO DE ALTERAÇÃO.
         if (
             ncols > 0
             and norm_cabecalho(df.columns[0])
             == norm_cabecalho("TIPO DE ALTERAÇÃO")
         ):
-
             letra = get_column_letter(1)
+            largura_atual = ws.column_dimensions[letra].width or 0
+            ws.column_dimensions[letra].width = max(largura_atual, 30)
 
-            largura_atual = (
-                ws.column_dimensions[letra].width
-                or 0
-            )
-
-            ws.column_dimensions[letra].width = max(
-                largura_atual,
-                30
-            )
-
-        # ==================================================
-        # GRAVAÇÃO DOS DADOS
-        # ==================================================
-
+        # GRAVAÇÃO DOS DADOS.
         for i, linha in enumerate(
             df.itertuples(index=False, name=None)
         ):
-
             r = header_row + 1 + i
-
-            bg_linha = (
-                bgs[i]
-                if i < len(bgs)
-                else ()
-            )
-
-            ft_linha = (
-                fontes[i]
-                if i < len(fontes)
-                else ()
-            )
+            bg_linha = bgs[i] if i < len(bgs) else ()
+            ft_linha = fontes[i] if i < len(fontes) else ()
 
             for c, valor in enumerate(linha):
-
-                # ------------------------------------------
-                # TRATAMENTO DE VALORES VAZIOS
-                # ------------------------------------------
-
+                # TRATAMENTO DE VALORES VAZIOS.
                 if valor is None:
-
                     valor = None
-
                 elif isinstance(valor, str):
-
                     if valor == "":
                         valor = None
-
                 else:
-
                     try:
-
                         if pd.isna(valor):
                             valor = None
-
                     except (TypeError, ValueError):
                         pass
 
-                # ------------------------------------------
-                # CONVERSÃO DE HORÁRIOS
-                # ------------------------------------------
-
+                # CONVERSÃO DE HORÁRIOS.
                 if (
                     valor is not None
                     and eh_col_hora[c]
                     and isinstance(valor, str)
                 ):
-
                     m = _RE_HORA.match(valor)
-
                     if m:
-
                         hora = int(m.group(1))
                         minuto = int(m.group(2))
-
                         if hora < 24 and minuto < 60:
+                            valor = time(hora, minuto)
 
-                            valor = time(
-                                hora,
-                                minuto
-                            )
+                # CRIA A CÉLULA.
+                cell = ws.cell(r, c + 1, valor)
 
-                # ------------------------------------------
-                # CRIA A CÉLULA
-                # ------------------------------------------
-
-                cell = ws.cell(
-                    r,
-                    c + 1,
-                    valor
-                )
-
-                # ------------------------------------------
-                # COR DE PREENCHIMENTO
-                # ------------------------------------------
-
+                # COR DE PREENCHIMENTO.
                 bg = (
                     bg_linha[c]
                     if c < len(bg_linha) and bg_linha[c]
                     else "#FFFFFF"
                 )
-
                 ft = (
                     ft_linha[c]
                     if c < len(ft_linha)
@@ -755,83 +686,48 @@ def salvar_cenario(
                     ft = None
 
                 cor_bg = bg.upper()
-
                 fill = cache_fill.get(cor_bg)
-
                 if fill is None:
-
                     fill = _fill_hex(cor_bg)
-
                     cache_fill[cor_bg] = fill
-
                 cell.fill = fill
 
-                # ------------------------------------------
-                # COR DA FONTE
-                # ------------------------------------------
-
+                # COR DA FONTE.
                 cor_ft = (
                     "FF" + ft.replace("#", "")[:6]
                     if ft
                     else fonte_preta
                 )
-
                 font_id = (
                     cell._style.fontId
                     if cell._style is not None
                     else 0
                 )
-
-                chave_fonte = (
-                    font_id,
-                    cor_ft
-                )
-
-                fonte = cache_fonte.get(
-                    chave_fonte
-                )
+                chave_fonte = (font_id, cor_ft)
+                fonte = cache_fonte.get(chave_fonte)
 
                 if fonte is None:
-
                     fonte = copy(cell.font)
-
                     fonte.color = cor_ft
-
                     cache_fonte[chave_fonte] = fonte
 
                 cell.font = fonte
 
-                # ------------------------------------------
-                # ALINHAMENTO
-                # ------------------------------------------
-
+                # ALINHAMENTO.
                 cell.alignment = alinhamento
 
-                # ------------------------------------------
-                # FORMATO DOS HORÁRIOS
-                # ------------------------------------------
-
+                # FORMATO DOS HORÁRIOS.
                 if isinstance(valor, time):
                     cell.number_format = "hh:mm"
 
-        # ==================================================
-        # LARGURAS DAS COLUNAS
-        # ==================================================
-
+        # LARGURAS DAS COLUNAS.
         for c in range(1, ncols + 1):
-
             letra = get_column_letter(c)
-
             if ws.column_dimensions[letra].width is None:
-
                 ws.column_dimensions[letra].width = 12
 
-        # ==================================================
-        # SALVAMENTO
-        # ==================================================
-
+        # SALVAMENTO.
         wb.save(caminho_saida)
 
     finally:
-
         wb.close()

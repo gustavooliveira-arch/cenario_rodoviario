@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 import argparse
 import colorsys
 import copy
@@ -33,12 +34,17 @@ COR = {
     "AZUL_CLARO": "#ADC9EE",
 }
 
-NOMES_TT = ["LINHA 1", "LINHA 2", "SERVIÇO 1", "SERVIÇO 2", "ETAPA", "TIPO DE HORÁRIO",
-            "TIPO DE ALTERAÇÃO", "ORIGEM", "DESTINO", "HR PARTIDA", "HR. CHEGADA", "FROTA",
-            "SEG", "TER", "QUA", "QUI", "SEX", "SAB", "DOM"]
-NOMES_CEN = ["LINHA", "SERVIÇO", "ETAPA/SEÇÃO", "TIPO",
-             "ORIGEM", "DESTINO", "PARTIDA", "CHEGADA", "FROTA",
-             "SEG", "TER", "QUA", "QUI", "SEX", "SÁB", "DOM"]
+NOMES_TT = [
+    "LINHA 1", "LINHA 2", "SERVIÇO 1", "SERVIÇO 2", "ETAPA",
+    "TIPO DE HORÁRIO", "TIPO DE ALTERAÇÃO", "ORIGEM", "DESTINO",
+    "HR PARTIDA", "HR. CHEGADA", "FROTA",
+    "SEG", "TER", "QUA", "QUI", "SEX", "SAB", "DOM"
+]
+NOMES_CEN = [
+    "LINHA", "SERVIÇO", "ETAPA/SEÇÃO", "TIPO", "ORIGEM", "DESTINO",
+    "PARTIDA", "CHEGADA", "FROTA",
+    "SEG", "TER", "QUA", "QUI", "SEX", "SÁB", "DOM"
+]
 
 
 class ErroProcesso(Exception):
@@ -84,7 +90,7 @@ def norm_sem_acento(v):
 
 
 def norm_cabecalho(v):
-    """Normaliza só para comparar cabeçalhos: sem acento, sem pontos, espaços/quebras unificados."""
+    """Normaliza cabeçalhos: sem acento, pontos e espaços excedentes."""
     s = norm_sem_acento(v).replace(".", " ")
     return re.sub(r"\s+", " ", s).strip()
 
@@ -102,7 +108,7 @@ def _hhmm(h, m):
 
 
 def ler_valor(v):
-    """Horários (time/datetime/timedelta) viram texto 'HH:MM', como no script original."""
+    """Converte horários em texto HH:MM, como no script original."""
     if isinstance(v, (dt.datetime, dt.time)):
         return _hhmm(v.hour, v.minute)
     if isinstance(v, dt.timedelta):
@@ -112,7 +118,7 @@ def ler_valor(v):
 
 
 def para_hora(v):
-    """Converte 'HH:MM' em horário real do Excel (para gravar com formato hh:mm)."""
+    """Converte HH:MM em horário real do Excel."""
     if isinstance(v, str):
         m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$", v)
         if m and int(m.group(1)) < 24 and int(m.group(2)) < 60:
@@ -125,8 +131,10 @@ def para_hora(v):
 
 # ============================ CORES ============================
 
-_TEMA = ["FFFFFF", "000000", "E7E6E6", "44546A", "4472C4", "ED7D31",
-         "A5A5A5", "FFC000", "5B9BD5", "70AD47", "0563C1", "954F72"]
+_TEMA = [
+    "FFFFFF", "000000", "E7E6E6", "44546A", "4472C4", "ED7D31",
+    "A5A5A5", "FFC000", "5B9BD5", "70AD47", "0563C1", "954F72"
+]
 
 
 def _tint(hex6, tint):
@@ -138,7 +146,7 @@ def _tint(hex6, tint):
 
 
 def cor_hex(cell):
-    """Cor de preenchimento da célula em '#RRGGBB' ('#FFFFFF' se não tiver preenchimento)."""
+    """Retorna a cor de preenchimento em #RRGGBB."""
     f = cell.fill
     if f is None or f.fill_type != "solid":
         return "#FFFFFF"
@@ -189,9 +197,11 @@ def cor_eh_vermelho(hexs):
 
 def eh_exclusao(tipo):
     t = norm_sem_acento(tipo)
-    return (("EXCLUSAO" in t and "FREQ" not in t) or
-            ("CANCELAMENTO" in t and "FREQ" not in t) or
-            "INATIVACAO" in t)
+    return (
+        ("EXCLUSAO" in t and "FREQ" not in t)
+        or ("CANCELAMENTO" in t and "FREQ" not in t)
+        or "INATIVACAO" in t
+    )
 
 
 def eh_exclusao_servico(tipo):
@@ -264,21 +274,22 @@ def combinar_exibicao(p1, p2):
 # ============================ CABEÇALHO / LIMITES ============================
 
 def localizar_cabecalho(ws, nomes):
-    """Devolve (linha_cabecalho, colunas 1-based de cada nome, nomes não encontrados).
-    Usa a linha que contém o maior número de nomes esperados."""
+    """Retorna linha do cabeçalho, colunas e nomes não encontrados."""
     alvo = [norm_cabecalho(n) for n in nomes]
     ult_lin = min(ws.max_row, MAX_LINHAS_CABECALHO)
 
     melhor_qtd, melhor_lin, melhor_pos = 0, 0, {}
     for r, linha in enumerate(
-            ws.iter_rows(min_row=1, max_row=ult_lin, max_col=ws.max_column, values_only=True), 1):
+        ws.iter_rows(min_row=1, max_row=ult_lin, max_col=ws.max_column, values_only=True),
+        1
+    ):
         pos = {}
         for c, v in enumerate(linha, 1):
             t = norm_cabecalho(v)
             if t and t not in pos:
                 pos[t] = c
         qtd = sum(1 for a in alvo if a in pos)
-        if qtd > melhor_qtd:  # empate: fica a linha mais acima
+        if qtd > melhor_qtd:
             melhor_qtd, melhor_lin, melhor_pos = qtd, r, pos
 
     cols = [melhor_pos.get(a, 0) for a in alvo]
@@ -286,10 +297,71 @@ def localizar_cabecalho(ws, nomes):
     return melhor_lin, cols, faltando
 
 
+def localizar_cabecalho_timetable(ws):
+    """
+    Localiza os cabeçalhos da TimeTable e aceita como coluna de classificação:
+    TIPO DE ALTERAÇÃO, TIPO DE HORÁRIO ou TIPO VIAGEM.
+    """
+    linha, cols, faltando = localizar_cabecalho(ws, NOMES_TT)
+
+    # A coluna 7 do mapeamento é a classificação usada pelo processamento.
+    # Os nomes alternativos podem ocupar a posição de TIPO DE HORÁRIO.
+    aliases = {
+        "TIPO DE ALTERACAO",
+        "TIPO DE HORARIO",
+        "TIPO VIAGEM",
+    }
+
+    pos = {}
+    for c in range(1, ws.max_column + 1):
+        nome = norm_cabecalho(ws.cell(linha, c).value)
+        if nome and nome not in pos:
+            pos[nome] = c
+
+    col_classificacao = next(
+        (pos[nome] for nome in (
+            "TIPO DE ALTERACAO",
+            "TIPO DE HORARIO",
+            "TIPO VIAGEM",
+        ) if nome in pos),
+        None
+    )
+
+    if col_classificacao is None:
+        raise ErroProcesso(
+            "Não foi encontrada uma coluna de classificação na aba "
+            "'%s'. Cabeçalhos aceitos: TIPO DE ALTERAÇÃO, "
+            "TIPO DE HORÁRIO ou TIPO VIAGEM." % ws.title
+        )
+
+    cols[6] = col_classificacao
+
+    # TIPO DE HORÁRIO é um campo independente quando existe.
+    # Se não existir, o alias também atende à posição usada para esse campo,
+    # evitando coluna zero em arquivos que possuem apenas TIPO VIAGEM.
+    if cols[5] == 0:
+        cols[5] = col_classificacao
+
+    faltando = [
+        nome for nome in faltando
+        if norm_cabecalho(nome) not in aliases
+    ]
+
+    if faltando:
+        raise ErroProcesso(
+            "Cabeçalhos não encontrados na aba '%s': %s"
+            % (ws.title, ", ".join(faltando))
+        )
+
+    return linha, cols
+
+
 def ultima_linha_util(ws, colunas, lin_cab):
-    """Última linha com valor real em alguma das colunas (ignora linhas em branco/formatadas)."""
+    """Última linha com valor real em alguma das colunas."""
     maxr = lin_cab
     for c in colunas:
+        if not c:
+            continue
         for r in range(ws.max_row, lin_cab, -1):
             if texto_bruto(ws.cell(r, c).value):
                 maxr = max(maxr, r)
@@ -312,7 +384,7 @@ def calcular_ranks_dias(cols_cen):
 # ============================ ESCRITA EM LOTE ============================
 
 class Lote:
-    """Acumula valores/cores/alinhamentos (a última escrita na célula vence) e grava de uma vez."""
+    """Acumula valores e estilos; a última escrita na célula vence."""
 
     def __init__(self):
         self.limpar()
@@ -340,63 +412,39 @@ class Lote:
         self.vl[(r, c)] = v
 
     def aplicar(self, ws):
-        # Reutiliza os objetos de estilo para melhorar o desempenho.
         fills = {}
-
         for (r, c), cor in self.bg.items():
             f = fills.get(cor)
-
             if f is None:
                 f = fills[cor] = PatternFill(
-                    "solid",
-                    fgColor="FF" + cor.lstrip("#").upper()
+                    "solid", fgColor="FF" + cor.lstrip("#").upper()
                 )
-
             ws.cell(r, c).fill = f
 
         fontes = {}
-
         for (r, c), cor in self.ft.items():
             cell = ws.cell(r, c)
-
-            font_id = (
-                cell._style.fontId
-                if cell._style is not None
-                else 0
-            )
-
+            font_id = cell._style.fontId if cell._style is not None else 0
             chave = (font_id, cor)
-
             f = fontes.get(chave)
-
             if f is None:
                 f = copy.copy(cell.font)
-                f.color = Color(
-                    rgb="FF" + cor.lstrip("#").upper()
-                )
+                f.color = Color(rgb="FF" + cor.lstrip("#").upper())
                 fontes[chave] = f
-
             cell.font = f
 
         alinhamentos = {}
-
         for (r, c) in self.ct:
             cell = ws.cell(r, c)
-
             alignment_id = (
-                cell._style.alignmentId
-                if cell._style is not None
-                else 0
+                cell._style.alignmentId if cell._style is not None else 0
             )
-
             a = alinhamentos.get(alignment_id)
-
             if a is None:
                 a = copy.copy(cell.alignment)
                 a.horizontal = "center"
                 a.vertical = "center"
                 alinhamentos[alignment_id] = a
-
             cell.alignment = a
 
         for (r, c), fmt in self.nf.items():
@@ -405,7 +453,6 @@ class Lote:
         for (r, c), v in self.vl.items():
             if (r, c) in self.nf:
                 v = para_hora(v)
-
             ws.cell(r, c).value = None if v == "" else v
 
 
@@ -413,9 +460,9 @@ class Lote:
 
 def inserir_linhas(ws, lista):
     """
-    Abre espaço para todas as linhas novas de uma só vez (equivale ao insertDimension em lote).
-    Reposiciona as células existentes e ajusta fórmulas de referência relativa da própria linha.
-    Atenção: mesclagens, formatação condicional, validações e filtros da aba NÃO são deslocados.
+    Abre espaço para as linhas novas de uma só vez.
+    Reposiciona células existentes e ajusta fórmulas relativas da própria linha.
+    Mesclagens, formatação condicional, validações e filtros não são deslocados.
     """
     alvos = sorted(it["targetRow"] for it in lista)
     novo = {}
@@ -425,15 +472,98 @@ def inserir_linhas(ws, lista):
             cell.row = nr
             if isinstance(cell.value, str) and cell.value.startswith("="):
                 col = get_column_letter(c)
-                cell.value = Translator(cell.value, origin="%s%d" % (col, r)) \
-                    .translate_formula("%s%d" % (col, nr))
+                cell.value = Translator(
+                    cell.value, origin="%s%d" % (col, r)
+                ).translate_formula("%s%d" % (col, nr))
         novo[(nr, c)] = cell
     ws._cells = novo
 
 
+# ============================ HORÁRIOS / LINHAS NOVAS ============================
+
+def ler_alteracao_horario(linha_orig, cols_tt, tt_v, tt_cor):
+    v_part = tt_v(linha_orig, cols_tt[9])
+    v_cheg = tt_v(linha_orig, cols_tt[10])
+    alt_part = cor_eh_amarelo(tt_cor(linha_orig, cols_tt[9]))
+    alt_cheg = cor_eh_amarelo(tt_cor(linha_orig, cols_tt[10]))
+
+    if not alt_part and not alt_cheg:
+        alt_part = len(texto_bruto(v_part)) > 0
+        alt_cheg = len(texto_bruto(v_cheg)) > 0
+
+    if not texto_bruto(v_part):
+        alt_part = False
+    if not texto_bruto(v_cheg):
+        alt_cheg = False
+
+    return {
+        "altPartida": alt_part,
+        "altChegada": alt_cheg,
+        "vPart": v_part,
+        "vCheg": v_cheg,
+    }
+
+
+def aplicar_horario(lote, r, cols_cen, h):
+    for flag, chave, col in (
+        ("altPartida", "vPart", cols_cen[6]),
+        ("altChegada", "vCheg", cols_cen[7]),
+    ):
+        if h[flag]:
+            v = valor_ou_branco(h[chave])
+            lote.valor(r, col, v)
+            if texto_bruto(v):
+                lote.formato_hora(r, col)
+            lote.pintar(r, col, col, COR["AMARELO"])
+
+
+def escrever_linha_nova(
+    lote, r, tt_v, l_orig, cols_tt, cols_cen, dia_cen_idx,
+    cor, ult_col_cen, resetar_fonte
+):
+    """Escreve uma linha nova do Cenário com um único S no dia indicado."""
+    v = lambda k: tt_v(l_orig, cols_tt[k])
+
+    lote.valor(
+        r, cols_cen[0],
+        valor_ou_branco(combinar_exibicao(v(0), v(1)))
+    )
+    lote.valor(
+        r, cols_cen[1],
+        valor_ou_branco(combinar_exibicao(v(2), v(3)))
+    )
+    lote.valor(r, cols_cen[2], valor_ou_branco(v(4)))
+    lote.valor(r, cols_cen[3], valor_ou_branco(v(5)))
+    lote.valor(r, cols_cen[4], valor_ou_branco(v(7)))
+    lote.valor(r, cols_cen[5], valor_ou_branco(v(8)))
+
+    for idx_cen, idx_tt in ((6, 9), (7, 10)):
+        h = valor_ou_branco(v(idx_tt))
+        lote.valor(r, cols_cen[idx_cen], h)
+        if texto_bruto(h):
+            lote.formato_hora(r, cols_cen[idx_cen])
+
+    frota = texto_bruto(valor_ou_branco(v(11)))
+    lote.valor(
+        r, cols_cen[8],
+        "" if not frota else (frota if frota[:2].upper() == "DD" else "DD" + frota)
+    )
+
+    for k_dia in range(7):
+        lote.valor(r, cols_cen[9 + k_dia], "")
+    lote.valor(r, cols_cen[dia_cen_idx], "S")
+
+    lote.pintar(r, 1, ult_col_cen, cor)
+    lote.centralizar(r, 1, ult_col_cen)
+    if resetar_fonte:
+        lote.fonte(r, 1, ult_col_cen, "#000000")
+
+
 # ============================ PROCESSO PRINCIPAL ============================
 
-def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=None):
+def _processar(
+    wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=None
+):
     def _p(pct, msg):
         if progresso:
             progresso(pct, msg)
@@ -441,107 +571,85 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
     _p(0, "Localizando cabeçalhos…")
     for nome in (nome_aba_tt, nome_aba_cenario):
         if nome not in wb.sheetnames:
-            raise ErroProcesso("Aba '%s' não encontrada. Abas do arquivo: %s"
-                               % (nome, ", ".join(wb.sheetnames)))
+            raise ErroProcesso(
+                "Aba '%s' não encontrada. Abas do arquivo: %s"
+                % (nome, ", ".join(wb.sheetnames))
+            )
 
-    ws_tt_v, ws_cen_v = wbv[nome_aba_tt], wbv[nome_aba_cenario]
+    ws_tt_v = wbv[nome_aba_tt]
+    ws_cen_v = wbv[nome_aba_cenario]
     ws_cen = wb[nome_aba_cenario]
 
-    lin_cab_tt, cols_tt, falt = localizar_cabecalho(ws_tt_v, NOMES_TT)
-    if falt:
-        raise ErroProcesso("Cabeçalhos não encontrados na aba '%s': %s" % (nome_aba_tt, ", ".join(falt)))
+    # ALTERAÇÃO: aceita TIPO DE ALTERAÇÃO, TIPO DE HORÁRIO ou TIPO VIAGEM.
+    lin_cab_tt, cols_tt = localizar_cabecalho_timetable(ws_tt_v)
+
     lin_cab_cen, cols_cen, falt = localizar_cabecalho(ws_cen_v, NOMES_CEN)
     if falt:
-        raise ErroProcesso("Cabeçalhos não encontrados na aba '%s': %s"
-                           % (nome_aba_cenario, ", ".join(falt)))
+        raise ErroProcesso(
+            "Cabeçalhos não encontrados na aba '%s': %s"
+            % (nome_aba_cenario, ", ".join(falt))
+        )
 
     day_rank = calcular_ranks_dias(cols_cen)
 
-    ult_lin_tt = ultima_linha_util(ws_tt_v, [cols_tt[0], cols_tt[2], cols_tt[6]], lin_cab_tt)
-    ult_lin_cen = ultima_linha_util(ws_cen_v, [cols_cen[0], cols_cen[1], cols_cen[2]], lin_cab_cen)
+    ult_lin_tt = ultima_linha_util(
+        ws_tt_v, [cols_tt[0], cols_tt[2], cols_tt[6]], lin_cab_tt
+    )
+    ult_lin_cen = ultima_linha_util(
+        ws_cen_v, [cols_cen[0], cols_cen[1], cols_cen[2]], lin_cab_cen
+    )
+
     if ult_lin_tt <= lin_cab_tt or ult_lin_cen <= lin_cab_cen:
-        raise ErroProcesso("Não foram encontrados dados abaixo do cabeçalho em alguma das abas.")
+        raise ErroProcesso(
+            "Não foram encontrados dados abaixo do cabeçalho em alguma das abas."
+        )
+
     ult_col_tt = ws_tt_v.max_column
 
     # ==========================================================
-    # CRIA OU REUTILIZA A COLUNA TIPO DE ALTERAÇÃO
+    # CRIA OU REUTILIZA A COLUNA TIPO DE ALTERAÇÃO NO CENÁRIO
     # ==========================================================
 
     cab_tipo_alt = norm_cabecalho("TIPO DE ALTERAÇÃO")
-
-    limite_busca = max(
-        ws_cen.max_column,
-        ws_cen_v.max_column
-    )
-
+    limite_busca = max(ws_cen.max_column, ws_cen_v.max_column)
     col_tipo_alt = None
 
     for c in range(1, limite_busca + 1):
-
-        nome_cab = norm_cabecalho(
-            ws_cen_v.cell(lin_cab_cen, c).value
-        )
-
+        nome_cab = norm_cabecalho(ws_cen_v.cell(lin_cab_cen, c).value)
         if nome_cab == cab_tipo_alt:
             col_tipo_alt = c
             break
 
-    # Verifica também a planilha de destino.
     if col_tipo_alt is None:
-
         for c in range(1, ws_cen.max_column + 1):
-
-            nome_cab = norm_cabecalho(
-                ws_cen.cell(lin_cab_cen, c).value
-            )
-
+            nome_cab = norm_cabecalho(ws_cen.cell(lin_cab_cen, c).value)
             if nome_cab == cab_tipo_alt:
                 col_tipo_alt = c
                 break
 
     if col_tipo_alt is None:
-
         col_tipo_alt = limite_busca + 1
-
-        cel_tipo = ws_cen.cell(
-            lin_cab_cen,
-            col_tipo_alt
-        )
-
-        cel_modelo = ws_cen.cell(
-            lin_cab_cen,
-            cols_cen[3]
-        )
-
-        cel_tipo._style = copy.copy(
-            cel_modelo._style
-        )
-
+        cel_tipo = ws_cen.cell(lin_cab_cen, col_tipo_alt)
+        cel_modelo = ws_cen.cell(lin_cab_cen, cols_cen[3])
+        cel_tipo._style = copy.copy(cel_modelo._style)
         cel_tipo.value = "TIPO DE ALTERAÇÃO"
-
         ws_cen.column_dimensions[
             get_column_letter(col_tipo_alt)
         ].width = 30
-
     else:
+        ws_cen.cell(lin_cab_cen, col_tipo_alt).value = "TIPO DE ALTERAÇÃO"
 
-        ws_cen.cell(
-            lin_cab_cen,
-            col_tipo_alt
-        ).value = "TIPO DE ALTERAÇÃO"
+    ult_col_cen = max(ws_cen.max_column, col_tipo_alt)
 
-    # Inclui a nova coluna no limite de processamento e pintura.
-    ult_col_cen = max(
-        ws_cen.max_column,
-        col_tipo_alt
-    )
     _p(5, "Lendo TimeTable…")
-
-    # ---- Leitura: TimeTable (só linhas com "Tipo de Alteração") ----
     tt_dados, tt_bg = {}, {}
+
     for r in range(lin_cab_tt + 1, ult_lin_tt + 1):
         if texto_bruto(ws_tt_v.cell(r, cols_tt[6]).value):
-            cells = [ws_tt_v.cell(r, c) for c in range(1, ult_col_tt + 1)]
+            cells = [
+                ws_tt_v.cell(r, c)
+                for c in range(1, ult_col_tt + 1)
+            ]
             tt_dados[r] = [ler_valor(c.value) for c in cells]
             tt_bg[r] = [cor_hex(c) for c in cells]
 
@@ -553,13 +661,21 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
 
     def tt_cor(r, c):
         linha = tt_bg.get(r)
-        return linha[c - 1] if linha and c - 1 < len(linha) else "#FFFFFF"
+        return (
+            linha[c - 1]
+            if linha and c - 1 < len(linha)
+            else "#FFFFFF"
+        )
 
     _p(15, "Lendo Cenário…")
-    # ---- Leitura: Cenário (valores em cache) ----
     cen = {}
-    for r, linha in enumerate(ws_cen_v.iter_rows(
-            min_row=1, max_row=ult_lin_cen, max_col=ult_col_cen, values_only=True), 1):
+    for r, linha in enumerate(
+        ws_cen_v.iter_rows(
+            min_row=1, max_row=ult_lin_cen,
+            max_col=ult_col_cen, values_only=True
+        ),
+        1
+    ):
         cen[r] = list(linha)
 
     def cen_v(r, c):
@@ -568,51 +684,39 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
             return ""
         return linha[c - 1]
 
-    # Chave de cruzamento montada em código (não existe coluna CHAVE nos arquivos):
-    # linha | serviço | etapa | origem | destino
+    # Chave: linha | serviço | etapa | origem | destino.
     def chave_tt(r):
-        partes = [combinar_exibicao(tt_v(r, cols_tt[0]), tt_v(r, cols_tt[1])),   # linha
-                  combinar_exibicao(tt_v(r, cols_tt[2]), tt_v(r, cols_tt[3])),   # serviço
-                  tt_v(r, cols_tt[4]),                                           # etapa
-                  tt_v(r, cols_tt[7]), tt_v(r, cols_tt[8])]                      # origem, destino
+        partes = [
+            combinar_exibicao(tt_v(r, cols_tt[0]), tt_v(r, cols_tt[1])),
+            combinar_exibicao(tt_v(r, cols_tt[2]), tt_v(r, cols_tt[3])),
+            tt_v(r, cols_tt[4]),
+            tt_v(r, cols_tt[7]),
+            tt_v(r, cols_tt[8]),
+        ]
         partes = [norm_chave(p) for p in partes]
         return "|".join(partes) if any(partes) else ""
 
     def chave_cen(r):
-        partes = [cen_v(r, cols_cen[0]), cen_v(r, cols_cen[1]), cen_v(r, cols_cen[2]),
-                  cen_v(r, cols_cen[4]), cen_v(r, cols_cen[5])]
+        partes = [
+            cen_v(r, cols_cen[0]),
+            cen_v(r, cols_cen[1]),
+            cen_v(r, cols_cen[2]),
+            cen_v(r, cols_cen[4]),
+            cen_v(r, cols_cen[5]),
+        ]
         partes = [norm_chave(p) for p in partes]
         return "|".join(partes) if any(partes) else ""
 
-    # Inicializa o lote antes de registrar ou limpar qualquer célula.
     lote = Lote()
 
-    # Limpa os tipos anteriores para evitar informações desatualizadas.
-    for r in range(
-            lin_cab_cen + 1,
-            ult_lin_cen + 1
-    ):
-        lote.valor(
-            r,
-            col_tipo_alt,
-            ""
-        )
+    # Limpa os tipos anteriores.
+    for r in range(lin_cab_cen + 1, ult_lin_cen + 1):
+        lote.valor(r, col_tipo_alt, "")
 
     def registrar_tipo(r, tipo):
-        """Registra o tipo de alteração na coluna adicional."""
-
         if texto_bruto(tipo):
-            lote.valor(
-                r,
-                col_tipo_alt,
-                texto_bruto(tipo)
-            )
-
-            lote.centralizar(
-                r,
-                col_tipo_alt,
-                col_tipo_alt
-            )
+            lote.valor(r, col_tipo_alt, texto_bruto(tipo))
+            lote.centralizar(r, col_tipo_alt, col_tipo_alt)
 
     def set_cen(r, c, v):
         cen[r][c - 1] = v
@@ -624,11 +728,15 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
                 return day_rank[d]
         return 0
 
-    q = dict(com_tipo=0, coloridas=0, inseridas=0, freq=0, reducao=0, exclusoes=0,
-             alteracao=0, horario=0, reducao_horario=0)
+    q = {
+        "com_tipo": 0, "coloridas": 0, "inseridas": 0, "freq": 0,
+        "reducao": 0, "exclusoes": 0, "alteracao": 0, "horario": 0,
+        "reducao_horario": 0,
+    }
+
     _p(25, "Mapeando alterações…")
-    # ---- 1) Mapeia alterações da TimeTable (pela chave) ----
     dic_cor, dic_count, dic_tipo, dic_linha_tt = {}, {}, {}, {}
+
     for i in range(lin_cab_tt + 1, ult_lin_tt + 1):
         if i not in tt_dados:
             continue
@@ -641,9 +749,10 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
                 dic_tipo[chave] = tipo_alt
                 dic_linha_tt[chave] = i
                 q["com_tipo"] += 1
+
     _p(35, "Cruzando com o Cenário…")
-    # ---- 2) Mapeia linhas EXISTENTES do Cenário (pela chave) ----
     dic_linhas_cen = {}
+
     for i in range(lin_cab_cen + 1, ult_lin_cen + 1):
         chave = chave_cen(i)
         if not chave:
@@ -651,77 +760,46 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
         dic_linhas_cen.setdefault(chave, []).append(i)
 
         if chave in dic_cor:
-
             tipo_alt = dic_tipo[chave]
 
-            # Exclusão
             if eh_exclusao(tipo_alt):
-
                 registrar_tipo(i, tipo_alt)
-
-                lote.pintar(
-                    i,
-                    1,
-                    ult_col_cen,
-                    COR["VERMELHO_ESCURO"]
-                )
+                lote.pintar(i, 1, ult_col_cen, COR["VERMELHO_ESCURO"])
 
                 if eh_exclusao_servico(tipo_alt):
                     lote.pintar(
-                        i,
-                        cols_cen[1],
-                        cols_cen[1],
+                        i, cols_cen[1], cols_cen[1],
                         COR["VINHO_SERVICO"]
                     )
 
-                lote.fonte(
-                    i,
-                    1,
-                    ult_col_cen,
-                    "#FFFFFF"
-                )
-
-                lote.centralizar(
-                    i,
-                    1,
-                    ult_col_cen
-                )
-
+                lote.fonte(i, 1, ult_col_cen, "#FFFFFF")
+                lote.centralizar(i, 1, ult_col_cen)
                 q["exclusoes"] += 1
                 dic_count[chave] += 1
 
-            # Demais alterações tratadas por pintura padrão
             elif not (
-                    eh_inclusao_frequencia(tipo_alt)
-                    or eh_reducao_frequencia(tipo_alt)
-                    or eh_alteracao_frequencia(tipo_alt)
-                    or eh_alteracao_horario(tipo_alt)
-                    or eh_reducao_freq_e_alt_horario(tipo_alt)
+                eh_inclusao_frequencia(tipo_alt)
+                or eh_reducao_frequencia(tipo_alt)
+                or eh_alteracao_frequencia(tipo_alt)
+                or eh_alteracao_horario(tipo_alt)
+                or eh_reducao_freq_e_alt_horario(tipo_alt)
             ):
-
                 registrar_tipo(i, tipo_alt)
-
-                lote.pintar(
-                    i,
-                    1,
-                    ult_col_cen,
-                    dic_cor[chave]
-                )
-
+                lote.pintar(i, 1, ult_col_cen, dic_cor[chave])
                 q["coloridas"] += 1
                 dic_count[chave] += 1
 
     proxima_linha_cen = ult_lin_cen + 1
     insercoes = []
+
     _p(45, "Planejando inclusões de frequência…")
-    # ---- 2c) INCLUSÃO DE FREQUÊNCIA (planejamento) ----
     for vk, tipo in dic_tipo.items():
         if not eh_inclusao_frequencia(tipo):
             continue
+
         linha_orig = dic_linha_tt[vk]
 
         if vk in dic_linhas_cen:
-            # Divide as linhas da chave em blocos (quando o rank do dia deixa de crescer)
             blocks, curr, prev = [], [], 0
             for r in dic_linhas_cen[vk]:
                 cur = rank_linha(r)
@@ -734,12 +812,19 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
                 blocks.append(curr)
 
             for dia_tt in range(12, 19):
-                if texto_bruto(tt_v(linha_orig, cols_tt[dia_tt])).upper() == "S":
+                if texto_bruto(
+                    tt_v(linha_orig, cols_tt[dia_tt])
+                ).upper() == "S":
                     r_new = day_rank[dia_tt - 12]
                     col_dia = cols_cen[dia_tt - 12 + 9]
+
                     for blk in blocks:
-                        if any(eh_marcacao_s(cen_v(r_in, col_dia)) for r_in in blk):
+                        if any(
+                            eh_marcacao_s(cen_v(r_in, col_dia))
+                            for r_in in blk
+                        ):
                             continue
+
                         alvo = None
                         for r_in in blk:
                             if rank_linha(r_in) > r_new:
@@ -747,58 +832,72 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
                                 break
                         if alvo is None:
                             alvo = blk[-1] + 1
-                        insercoes.append(
-                            dict(
-                                targetRow=alvo,
-                                dayRank=r_new,
-                                diaIdxTT=dia_tt,
-                                linhaOrig=linha_orig,
-                                tipo=tipo
-                            )
-                        )
+
+                        insercoes.append({
+                            "targetRow": alvo,
+                            "dayRank": r_new,
+                            "diaIdxTT": dia_tt,
+                            "linhaOrig": linha_orig,
+                            "tipo": tipo,
+                        })
+
             dic_count[vk] = 1
+
         else:
             for dia_tt in range(12, 19):
-                if texto_bruto(tt_v(linha_orig, cols_tt[dia_tt])).upper() == "S":
-                    insercoes.append(
-                        dict(
-                            targetRow=proxima_linha_cen,
-                            dayRank=day_rank[dia_tt - 12],
-                            diaIdxTT=dia_tt,
-                            linhaOrig=linha_orig,
-                            tipo=tipo
-                        )
-                    )
+                if texto_bruto(
+                    tt_v(linha_orig, cols_tt[dia_tt])
+                ).upper() == "S":
+                    insercoes.append({
+                        "targetRow": proxima_linha_cen,
+                        "dayRank": day_rank[dia_tt - 12],
+                        "diaIdxTT": dia_tt,
+                        "linhaOrig": linha_orig,
+                        "tipo": tipo,
+                    })
             dic_count[vk] = 1
+
     _p(55, "Aplicando reduções e alterações…")
-    # ---- 2d) REDUÇÃO DE FREQUÊNCIA ----
+
+    # REDUÇÃO DE FREQUÊNCIA
     for vk, tipo in dic_tipo.items():
         if not eh_reducao_frequencia(tipo) or vk not in dic_linhas_cen:
             continue
+
         linha_orig = dic_linha_tt[vk]
         for dia_tt in range(12, 19):
-            v_tt, b_tt = tt_v(linha_orig, cols_tt[dia_tt]), tt_cor(linha_orig, cols_tt[dia_tt])
+            v_tt = tt_v(linha_orig, cols_tt[dia_tt])
+            b_tt = tt_cor(linha_orig, cols_tt[dia_tt])
+
             if eh_marcacao_reducao(v_tt, b_tt):
                 col_c = cols_cen[dia_tt - 12 + 9]
                 for r in dic_linhas_cen[vk]:
                     if eh_marcacao_s(cen_v(r, col_c)):
                         registrar_tipo(r, tipo)
                         set_cen(r, col_c, "X")
-                        lote.pintar(r, 1, ult_col_cen, COR["VERMELHO_CLARO"])
+                        lote.pintar(
+                            r, 1, ult_col_cen, COR["VERMELHO_CLARO"]
+                        )
                         lote.centralizar(r, 1, ult_col_cen)
                         lote.pintar(r, col_c, col_c, b_tt)
                         q["reducao"] += 1
+
         dic_count[vk] = 1
 
-    # ---- 2d-bis) ALTERAÇÃO DE FREQUÊNCIA ----
+    # ALTERAÇÃO DE FREQUÊNCIA
     linhas_alt = set()
+
     for vk, tipo in dic_tipo.items():
         if not eh_alteracao_frequencia(tipo) or vk not in dic_linhas_cen:
             continue
+
         linha_orig = dic_linha_tt[vk]
         dias_saem, dias_entram = [], []
+
         for dia_tt in range(12, 19):
-            v_tt, b_tt = tt_v(linha_orig, cols_tt[dia_tt]), tt_cor(linha_orig, cols_tt[dia_tt])
+            v_tt = tt_v(linha_orig, cols_tt[dia_tt])
+            b_tt = tt_cor(linha_orig, cols_tt[dia_tt])
+
             if eh_marcacao_reducao(v_tt, b_tt):
                 dias_saem.append(dia_tt)
             elif texto_bruto(v_tt).upper() == "S" and cor_eh_verde(b_tt):
@@ -807,121 +906,193 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
         for dia_sai in dias_saem:
             col_sai = cols_cen[dia_sai - 12 + 9]
             b_sai = tt_cor(linha_orig, cols_tt[dia_sai])
+
             for r in dic_linhas_cen[vk]:
                 if eh_marcacao_s(cen_v(r, col_sai)):
                     registrar_tipo(r, tipo)
+
                     if r not in linhas_alt:
                         linhas_alt.add(r)
                         lote.pintar(r, 1, ult_col_cen, COR["LARANJA"])
+
                     set_cen(r, col_sai, "X")
                     lote.pintar(r, col_sai, col_sai, b_sai)
                     lote.centralizar(r, col_sai, col_sai)
+
                     for dia_entra in dias_entram:
                         col_entra = cols_cen[dia_entra - 12 + 9]
                         set_cen(r, col_entra, "S")
-                        lote.pintar(r, col_entra, col_entra, tt_cor(linha_orig, cols_tt[dia_entra]))
+                        lote.pintar(
+                            r, col_entra, col_entra,
+                            tt_cor(linha_orig, cols_tt[dia_entra])
+                        )
                         lote.centralizar(r, col_entra, col_entra)
+
                     q["alteracao"] += 1
+
         dic_count[vk] = 1
 
-    # ---- 2d-ter) ALTERAÇÃO DE HORÁRIO ----
+    # ALTERAÇÃO DE HORÁRIO
     for vk, tipo in dic_tipo.items():
         if not eh_alteracao_horario(tipo) or vk not in dic_linhas_cen:
             continue
-        h = ler_alteracao_horario(dic_linha_tt[vk], cols_tt, tt_v, tt_cor)
+
+        h = ler_alteracao_horario(
+            dic_linha_tt[vk], cols_tt, tt_v, tt_cor
+        )
+
         if h["altPartida"] or h["altChegada"]:
             for r in dic_linhas_cen[vk]:
                 registrar_tipo(r, tipo)
-                lote.pintar(r, 1, ult_col_cen, COR["AMARELO_CLARO"])
+                lote.pintar(
+                    r, 1, ult_col_cen, COR["AMARELO_CLARO"]
+                )
                 aplicar_horario(lote, r, cols_cen, h)
                 q["horario"] += 1
+
         dic_count[vk] = 1
 
-    # ---- 2d-quater) REDUÇÃO DE FREQUÊNCIA E ALTERAÇÃO DE HORÁRIO ----
+    # REDUÇÃO DE FREQUÊNCIA E ALTERAÇÃO DE HORÁRIO
     for vk, tipo in dic_tipo.items():
-        if not eh_reducao_freq_e_alt_horario(tipo) or vk not in dic_linhas_cen:
+        if (
+            not eh_reducao_freq_e_alt_horario(tipo)
+            or vk not in dic_linhas_cen
+        ):
             continue
+
         linha_orig = dic_linha_tt[vk]
-        dia_sai = {d: eh_marcacao_reducao(tt_v(linha_orig, cols_tt[d]), tt_cor(linha_orig, cols_tt[d]))
-                   for d in range(12, 19)}
-        h = ler_alteracao_horario(linha_orig, cols_tt, tt_v, tt_cor)
+        dia_sai = {
+            d: eh_marcacao_reducao(
+                tt_v(linha_orig, cols_tt[d]),
+                tt_cor(linha_orig, cols_tt[d])
+            )
+            for d in range(12, 19)
+        }
+        h = ler_alteracao_horario(
+            linha_orig, cols_tt, tt_v, tt_cor
+        )
 
         for r in dic_linhas_cen[vk]:
             alterada = h["altPartida"] or h["altChegada"]
+
             if not alterada:
-                alterada = any(dia_sai[d] and eh_marcacao_s(cen_v(r, cols_cen[d - 12 + 9]))
-                               for d in range(12, 19))
+                alterada = any(
+                    dia_sai[d]
+                    and eh_marcacao_s(cen_v(r, cols_cen[d - 12 + 9]))
+                    for d in range(12, 19)
+                )
+
             if alterada:
                 registrar_tipo(r, tipo)
                 lote.pintar(r, 1, ult_col_cen, COR["AZUL_CLARO"])
+
                 for d in range(12, 19):
                     if dia_sai[d]:
                         col_c = cols_cen[d - 12 + 9]
                         if eh_marcacao_s(cen_v(r, col_c)):
                             b_tt = tt_cor(linha_orig, cols_tt[d])
                             set_cen(r, col_c, "X")
-                            lote.pintar(r, col_c, col_c,
-                                        b_tt if cor_eh_vermelho(b_tt) else COR["VERMELHO"])
+                            lote.pintar(
+                                r, col_c, col_c,
+                                b_tt if cor_eh_vermelho(b_tt)
+                                else COR["VERMELHO"]
+                            )
                             lote.centralizar(r, col_c, col_c)
+
                 aplicar_horario(lote, r, cols_cen, h)
                 q["reducao_horario"] += 1
+
         dic_count[vk] = 1
+
     _p(70, "Gravando alterações…")
-    # ---- Grava o que mexeu em linhas existentes (antes de inserir linhas) ----
     lote.aplicar(ws_cen)
     lote.limpar()
+
     _p(78, "Inserindo linhas…")
-    # ---- Inserções de frequência ----
     n_ins = len(insercoes)
+
     if n_ins > 0:
-        insercoes.sort(key=lambda it: (-it["targetRow"], -it["dayRank"]))
+        insercoes.sort(
+            key=lambda it: (-it["targetRow"], -it["dayRank"])
+        )
         inserir_linhas(ws_cen, insercoes)
 
         for idx, it in enumerate(insercoes):
             r_final = it["targetRow"] + (n_ins - idx - 1)
             dia_cen_idx = it["diaIdxTT"] - 12 + 9
-            escrever_linha_nova(lote, r_final, tt_v, it["linhaOrig"], cols_tt, cols_cen,
-                                dia_cen_idx, COR["VERDE_CLARO"], ult_col_cen, True)
-            registrar_tipo(
-                r_final,
-                it["tipo"]
+
+            escrever_linha_nova(
+                lote, r_final, tt_v, it["linhaOrig"],
+                cols_tt, cols_cen, dia_cen_idx,
+                COR["VERDE_CLARO"], ult_col_cen, True
             )
-            cor_dia = tt_cor(it["linhaOrig"], cols_tt[it["diaIdxTT"]])
+            registrar_tipo(r_final, it["tipo"])
+
+            cor_dia = tt_cor(
+                it["linhaOrig"], cols_tt[it["diaIdxTT"]]
+            )
             if not cor_eh_branca(cor_dia):
-                lote.pintar(r_final, cols_cen[dia_cen_idx], cols_cen[dia_cen_idx], cor_dia)
+                lote.pintar(
+                    r_final,
+                    cols_cen[dia_cen_idx],
+                    cols_cen[dia_cen_idx],
+                    cor_dia
+                )
+
             q["freq"] += 1
             proxima_linha_cen += 1
+
     _p(88, "Aplicando inclusões…")
-    # ---- 2e) INCLUSÃO padrão (respeita a ordem física das colunas de dias) ----
+
+    # INCLUSÃO PADRÃO
     for vk, cor in dic_cor.items():
         if dic_count[vk] == 0 and eh_inclusao(dic_tipo[vk]):
             linha_orig = dic_linha_tt[vk]
             inc_serv = eh_inclusao_servico(dic_tipo[vk])
-            cor_linha = COR["VERDE_INCLUSAO_SERVICO"] if inc_serv else cor
+            cor_linha = (
+                COR["VERDE_INCLUSAO_SERVICO"] if inc_serv else cor
+            )
 
             for rank_loop in range(1, 8):
                 for dia_rel in range(7):
                     if day_rank[dia_rel] == rank_loop:
                         dia_tt = 12 + dia_rel
-                        if texto_bruto(tt_v(linha_orig, cols_tt[dia_tt])).upper() == "S":
-                            escrever_linha_nova(lote, proxima_linha_cen, tt_v, linha_orig, cols_tt,
-                                                cols_cen, dia_rel + 9, cor_linha, ult_col_cen, False)
-                            registrar_tipo(
-                                proxima_linha_cen,
-                                dic_tipo[vk]
+
+                        if texto_bruto(
+                            tt_v(linha_orig, cols_tt[dia_tt])
+                        ).upper() == "S":
+                            escrever_linha_nova(
+                                lote, proxima_linha_cen, tt_v,
+                                linha_orig, cols_tt, cols_cen,
+                                dia_rel + 9, cor_linha,
+                                ult_col_cen, False
                             )
+                            registrar_tipo(
+                                proxima_linha_cen, dic_tipo[vk]
+                            )
+
                             if inc_serv:
-                                lote.pintar(proxima_linha_cen, cols_cen[1], cols_cen[1],
-                                            COR["VERDE_SERVICO_CELULA"])
+                                lote.pintar(
+                                    proxima_linha_cen,
+                                    cols_cen[1], cols_cen[1],
+                                    COR["VERDE_SERVICO_CELULA"]
+                                )
+
                             q["inseridas"] += 1
                             proxima_linha_cen += 1
                         break
+
             dic_count[vk] = 1
+
     _p(95, "Finalizando…")
     lote.aplicar(ws_cen)
 
-    # ---- 3) Relatório ----
-    nao_enc = [vk for vk, qtd in dic_count.items() if qtd == 0]
+    # RELATÓRIO
+    nao_enc = [
+        vk for vk, qtd in dic_count.items()
+        if qtd == 0
+    ]
+
     linhas = [
         "Linhas com 'Tipo de Alteração' na TimeTable: %d" % q["com_tipo"],
         "Linhas coloridas em '%s': %d" % (nome_aba_cenario, q["coloridas"]),
@@ -931,99 +1102,71 @@ def _processar(wb, wbv, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE, progresso=N
         "Linhas alteradas (Redução de Frequência): %d" % q["reducao"],
         "Linhas alteradas (Alteração de Frequência): %d" % q["alteracao"],
         "Linhas alteradas (Alteração de Horário): %d" % q["horario"],
-        "Linhas alteradas (Redução de Frequência e Alteração de Horário): %d" % q["reducao_horario"],
+        "Linhas alteradas (Redução de Frequência e Alteração de Horário): %d"
+        % q["reducao_horario"],
         "Chaves não encontradas no Cenário: %d" % len(nao_enc),
     ]
+
     linhas += ["    - " + vk for vk in nao_enc[:15]]
     if len(nao_enc) > 15:
         linhas.append("    ...")
+
     return "\n".join(linhas)
 
 
 def executar(entrada, saida, nome_aba_cenario, nome_aba_tt=ABA_TIMETABLE):
     entrada = Path(entrada)
-    wb = load_workbook(entrada, keep_vba=entrada.suffix.lower() == ".xlsm")  # fórmulas + estilos
-    wbv = load_workbook(entrada, data_only=True)                              # valores em cache
-    relatorio = _processar(wb, wbv, nome_aba_cenario, nome_aba_tt)
+    wb = load_workbook(
+        entrada,
+        keep_vba=entrada.suffix.lower() == ".xlsm"
+    )
+    wbv = load_workbook(entrada, data_only=True)
+
+    relatorio = _processar(
+        wb, wbv, nome_aba_cenario, nome_aba_tt
+    )
     wb.save(saida)
+
     print(relatorio)
     print("\nArquivo gerado: %s" % saida)
-
-
-# ============================ HORÁRIOS / LINHAS NOVAS ============================
-
-def ler_alteracao_horario(linha_orig, cols_tt, tt_v, tt_cor):
-    v_part, v_cheg = tt_v(linha_orig, cols_tt[9]), tt_v(linha_orig, cols_tt[10])
-    alt_part = cor_eh_amarelo(tt_cor(linha_orig, cols_tt[9]))
-    alt_cheg = cor_eh_amarelo(tt_cor(linha_orig, cols_tt[10]))
-
-    # Se nenhuma estiver amarela, considera a(s) que tiver(em) valor preenchido
-    if not alt_part and not alt_cheg:
-        alt_part = len(texto_bruto(v_part)) > 0
-        alt_cheg = len(texto_bruto(v_cheg)) > 0
-    # Nunca apaga um horário do Cenário com uma célula vazia da TimeTable
-    if not texto_bruto(v_part):
-        alt_part = False
-    if not texto_bruto(v_cheg):
-        alt_cheg = False
-    return dict(altPartida=alt_part, altChegada=alt_cheg, vPart=v_part, vCheg=v_cheg)
-
-
-def aplicar_horario(lote, r, cols_cen, h):
-    for flag, chave, col in (("altPartida", "vPart", cols_cen[6]), ("altChegada", "vCheg", cols_cen[7])):
-        if h[flag]:
-            v = valor_ou_branco(h[chave])
-            lote.valor(r, col, v)
-            if texto_bruto(v):
-                lote.formato_hora(r, col)
-            lote.pintar(r, col, col, COR["AMARELO"])
-
-
-def escrever_linha_nova(lote, r, tt_v, l_orig, cols_tt, cols_cen, dia_cen_idx, cor,
-                        ult_col_cen, resetar_fonte):
-    """Linha nova do Cenário com 1 único "S" no dia indicado."""
-    v = lambda k: tt_v(l_orig, cols_tt[k])
-
-    lote.valor(r, cols_cen[0], valor_ou_branco(combinar_exibicao(v(0), v(1))))
-    lote.valor(r, cols_cen[1], valor_ou_branco(combinar_exibicao(v(2), v(3))))
-    lote.valor(r, cols_cen[2], valor_ou_branco(v(4)))
-    lote.valor(r, cols_cen[3], valor_ou_branco(v(5)))
-    lote.valor(r, cols_cen[4], valor_ou_branco(v(7)))
-    lote.valor(r, cols_cen[5], valor_ou_branco(v(8)))
-
-    for idx_cen, idx_tt in ((6, 9), (7, 10)):
-        h = valor_ou_branco(v(idx_tt))
-        lote.valor(r, cols_cen[idx_cen], h)
-        if texto_bruto(h):
-            lote.formato_hora(r, cols_cen[idx_cen])
-
-    f = texto_bruto(valor_ou_branco(v(11)))
-    lote.valor(r, cols_cen[8], "" if not f else (f if f[:2].upper() == "DD" else "DD" + f))
-
-    for k_dia in range(7):
-        lote.valor(r, cols_cen[9 + k_dia], "")
-    lote.valor(r, cols_cen[dia_cen_idx], "S")
-
-    lote.pintar(r, 1, ult_col_cen, cor)
-    lote.centralizar(r, 1, ult_col_cen)
-    if resetar_fonte:
-        lote.fonte(r, 1, ult_col_cen, "#000000")
 
 
 # ============================ LINHA DE COMANDO ============================
 
 def main():
-    ap = argparse.ArgumentParser(description="Aplica as alterações da TimeTable na aba de cenário.")
+    ap = argparse.ArgumentParser(
+        description="Aplica as alterações da TimeTable na aba de cenário."
+    )
     ap.add_argument("arquivo", help="arquivo .xlsx de entrada")
-    ap.add_argument("cenario", help="nome da aba de cenário (ex.: 'Cenário 1')")
-    ap.add_argument("-o", "--saida", help="arquivo de saída (padrão: <arquivo>_processado.xlsx)")
-    ap.add_argument("--timetable", default=ABA_TIMETABLE, help="nome da aba TimeTable")
+    ap.add_argument(
+        "cenario",
+        help="nome da aba de cenário (ex.: 'Cenário 1')"
+    )
+    ap.add_argument(
+        "-o", "--saida",
+        help="arquivo de saída (padrão: <arquivo>_processado.xlsx)"
+    )
+    ap.add_argument(
+        "--timetable",
+        default=ABA_TIMETABLE,
+        help="nome da aba TimeTable"
+    )
     a = ap.parse_args()
 
     entrada = Path(a.arquivo)
-    saida = Path(a.saida) if a.saida else entrada.with_name(entrada.stem + "_processado" + entrada.suffix)
+    saida = (
+        Path(a.saida)
+        if a.saida
+        else entrada.with_name(
+            entrada.stem + "_processado" + entrada.suffix
+        )
+    )
+
     if saida.resolve() == entrada.resolve():
-        sys.exit("O arquivo de saída não pode ser o mesmo da entrada.")
+        sys.exit(
+            "O arquivo de saída não pode ser o mesmo da entrada."
+        )
+
     try:
         executar(entrada, saida, a.cenario, a.timetable)
     except ErroProcesso as e:
